@@ -1,6 +1,6 @@
 'use client';
 
-export const dynamic = 'force-dynamic'; // avoid prerendering / static export
+export const dynamic = 'force-dynamic'; // avoid prerendering
 
 import React, { FormEvent, useEffect, useState, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -32,8 +32,9 @@ function LoginInner() {
       });
       if (error) setError(error.message);
       else setSent(true);
-    } catch (err: any) {
-      setError(err?.message ?? 'Network request failed');
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err ?? 'Network request failed');
+      setError(message);
     }
   }
 
@@ -58,7 +59,7 @@ function LoginInner() {
 }
 
 export default function LoginPage() {
-  // Wrap the component that calls useSearchParams() in Suspense
+  // Wrap the hook user in Suspense per Next 15 requirement
   return (
     <Suspense fallback={<div className="p-4">Loading…</div>}>
       <LoginInner />

@@ -44,7 +44,7 @@ export default function PreferencesPage() {
 
   function editList(field: 'allergies' | 'dislikes', value: string) {
     const cur = new Set(prefs[field]);
-    cur.has(value) ? cur.delete(value) : cur.add(value);
+    if (cur.has(value)) cur.delete(value); else cur.add(value);
     setPrefs({ ...prefs, [field]: Array.from(cur) });
   }
 
@@ -146,7 +146,7 @@ export default function PreferencesPage() {
         <button onClick={save} className="rounded bg-black text-white px-4 py-2">
           Save
         </button>
-        {saved && <span className="text-green-600">Saved!</span>}
+        {saved ? <span className="text-green-600">Saved!</span> : null}
       </div>
     </div>
   );
