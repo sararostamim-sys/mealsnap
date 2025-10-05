@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
+import FavoriteButton from '@/components/FavoriteButton'; // ← NEW
 
 type Recipe = { id: string; title: string; time_min: number; diet_tags: string[] | null; instructions: string; };
 type Ing = { recipe_id: string; name: string; qty: number | null; unit: string | null; optional: boolean; };
@@ -123,8 +124,15 @@ export default function PlanPage() {
           <div className="grid md:grid-cols-2 gap-4">
             {meals.map(m => (
               <div key={m.id} className="border rounded p-3">
-                <div className="font-medium">{m.title}</div>
-                <div className="text-sm text-gray-600">{m.time_min} min</div>
+                {/* Card header with favorite */}
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="font-medium">{m.title}</div>
+                    <div className="text-sm text-gray-600">{m.time_min} min</div>
+                  </div>
+                  <FavoriteButton recipe={{ id: m.id, title: m.title }} /> {/* ← NEW */}
+                </div>
+
                 <p className="text-sm mt-2 line-clamp-3">{m.instructions}</p>
                 <div className="mt-3 flex gap-2">
                   <button
@@ -168,7 +176,11 @@ export default function PlanPage() {
       <Modal open={!!openId} onClose={() => setOpenId(null)}>
         {openRecipe ? (
           <div>
-            <h3 className="text-xl font-semibold">{openRecipe.title}</h3>
+            {/* Modal header with favorite */}
+            <div className="flex items-start justify-between">
+              <h3 className="text-xl font-semibold">{openRecipe.title}</h3>
+              <FavoriteButton recipe={{ id: openRecipe.id, title: openRecipe.title }} /> {/* ← NEW */}
+            </div>
             <div className="text-sm text-gray-600 mb-3">{openRecipe.time_min} min</div>
 
             <h4 className="font-medium mt-3 mb-1">Ingredients</h4>

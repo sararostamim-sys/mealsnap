@@ -9,6 +9,7 @@ const LINKS = [
   { href: '/pantry', label: 'Pantry' },
   { href: '/preferences', label: 'Preferences' },
   { href: '/plan', label: 'Plan' },
+  { href: '/favorites', label: 'Favorites' }, 
 ];
 
 export default function AppHeader() {
