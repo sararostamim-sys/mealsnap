@@ -1,14 +1,14 @@
 'use client';
 
-import { useEffect, useMemo, useState, useTransition } from 'react';
+import { useEffect, useState, useTransition } from 'react';
 import { supabase } from '@/lib/supabase';
 
 type RecipeLite = {
-  id: string;              // your recipe id (API id or internal)
+  id: string;
   title: string;
   image_url?: string | null;
   source_url?: string | null;
-  data?: any;              // optional extra JSON you want to store
+  data?: Record<string, unknown> | null; // typed (no 'any')
 };
 
 export default function FavoriteButton({ recipe }: { recipe: RecipeLite }) {
@@ -36,7 +36,6 @@ export default function FavoriteButton({ recipe }: { recipe: RecipeLite }) {
     startTransition(async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
-        // send them to login, then back to the recipe list
         window.location.href = `/login?redirect=/favorites`;
         return;
       }
@@ -62,7 +61,6 @@ export default function FavoriteButton({ recipe }: { recipe: RecipeLite }) {
     });
   }
 
-  // Simple heart UI without extra icon deps
   return (
     <button
       onClick={toggle}
