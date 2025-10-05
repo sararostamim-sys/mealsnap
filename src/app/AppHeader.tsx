@@ -7,8 +7,8 @@ import { supabase } from '@/lib/supabase';
 
 const LINKS = [
   { href: '/pantry', label: 'Pantry' },
-  { href: '/plan', label: 'Plan' },
   { href: '/preferences', label: 'Preferences' },
+  { href: '/plan', label: 'Plan' },
 ];
 
 export default function AppHeader() {
