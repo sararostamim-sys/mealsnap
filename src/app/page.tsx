@@ -13,18 +13,12 @@ export default function Home() {
           so you save time, money, and headspace.
         </p>
 
-        <div className="mt-8 flex items-center justify-center gap-3">
+        <div className="mt-8 flex items-center justify-center">
           <Link
             href="/login"
-            className="rounded-2xl px-5 py-3 bg-black text-white hover:opacity-90 transition"
+            className="rounded-2xl px-6 py-3 bg-black text-white hover:opacity-90 transition"
           >
             Sign in
-          </Link>
-          <Link
-            href="/pantry"
-            className="rounded-2xl px-5 py-3 border border-black/10 hover:bg-black/5 transition"
-          >
-            Go to Pantry
           </Link>
         </div>
       </section>
