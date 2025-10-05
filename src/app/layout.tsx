@@ -4,8 +4,7 @@ import AppHeader from './AppHeader';
 
 export const metadata: Metadata = {
   title: 'MealSnap',
-  description:
-    'Turn what you already have into great meals—faster, cheaper, with less waste.',
+  description: 'Turn what you already have into great meals—faster, cheaper, with less waste.',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
