@@ -1,72 +1,190 @@
-/* eslint-disable @next/next/no-img-element */
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { useRequireAuth } from '@/hooks/useRequireAuth';
+import FavoriteButton from '@/components/FavoriteButton';
 
-type Fav = {
+type Recipe = {
   id: string;
+  title: string;
+  time_min: number;
+  diet_tags: string[] | null;
+  instructions: string;
+};
+
+type Ing = {
   recipe_id: string;
-  title: string | null;
-  image_url: string | null;
-  source_url: string | null;
-  created_at: string;
+  name: string;
+  qty: number | null;
+  unit: string | null;
+  optional: boolean;
 };
 
 export default function FavoritesPage() {
-  const [favs, setFavs] = useState<Fav[] | null>(null);
+  useRequireAuth();
+
   const [loading, setLoading] = useState(true);
+  const [recipes, setRecipes] = useState<Recipe[]>([]);
+  const [ings, setIngs] = useState<Ing[]>([]);
+  const [openId, setOpenId] = useState<string | null>(null);
 
   useEffect(() => {
-    let alive = true;
     (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        window.location.href = '/login?redirect=/favorites';
+      // 1) get favorite recipe ids
+      const { data: favs, error: favErr } = await supabase
+        .from('favorites')
+        .select('recipe_id, created_at')
+        .order('created_at', { ascending: false });
+
+      if (favErr) {
+        console.error(favErr);
+        setRecipes([]);
+        setIngs([]);
+        setLoading(false);
         return;
       }
-      const { data, error } = await supabase
-        .from('favorites')
-        .select('id,recipe_id,title,image_url,source_url,created_at')
-        .order('created_at', { ascending: false });
-      if (error) console.error(error);
-      if (alive) {
-        setFavs(data ?? []);
+
+      const ids = (favs ?? []).map(f => f.recipe_id);
+      if (ids.length === 0) {
+        setRecipes([]);
+        setIngs([]);
         setLoading(false);
+        return;
       }
+
+      // 2) fetch recipe details + ingredients, matching Plan page fields
+      const [{ data: rRes }, { data: iRes }] = await Promise.all([
+        supabase.from('recipes')
+          .select('id,title,time_min,diet_tags,instructions')
+          .in('id', ids),
+        supabase.from('recipe_ingredients')
+          .select('recipe_id,name,qty,unit,optional')
+          .in('recipe_id', ids),
+      ]);
+
+      setRecipes(rRes || []);
+      setIngs(iRes || []);
+      setLoading(false);
     })();
-    return () => { alive = false; };
   }, []);
 
-  if (loading) return <div className="p-6">Loading…</div>;
-  if (!favs || favs.length === 0) return <div className="p-6">No favorites yet.</div>;
+  // helpers to show recipe detail (same pattern as Plan)
+  const ingByRecipe = useMemo(() => {
+    const m = new Map<string, Ing[]>();
+    ings.forEach(i => {
+      const arr = m.get(i.recipe_id) || [];
+      arr.push(i);
+      m.set(i.recipe_id, arr);
+    });
+    return m;
+  }, [ings]);
+
+  const openRecipe = recipes.find(r => r.id === openId) || null;
+  const openIngs = openId ? (ingByRecipe.get(openId) || []) : [];
+
+  if (loading) return <p>Loading…</p>;
+  if (recipes.length === 0) return <p>No favorites yet.</p>;
 
   return (
-    <main className="mx-auto max-w-5xl p-6 grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-      {favs.map((f) => (
-        <article key={f.id} className="border rounded-xl p-4 flex flex-col">
-          {f.image_url && (
-            <img
-              src={f.image_url}
-              alt=""
-              className="rounded-md mb-3 aspect-video object-cover"
-            />
-          )}
-          <h3 className="font-semibold">{f.title ?? 'Untitled recipe'}</h3>
-          <div className="mt-auto flex gap-3 pt-3">
-            {f.source_url && (
-              <a
-                href={f.source_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-sm underline"
+    <div className="max-w-3xl">
+      <h1 className="text-2xl font-semibold mb-4">Favorites</h1>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        {recipes.map(r => (
+          <div key={r.id} className="border rounded p-3">
+            {/* Card header with favorite (matches Plan) */}
+            <div className="flex items-start justify-between">
+              <div>
+                <div className="font-medium">{r.title}</div>
+                <div className="text-sm text-gray-600">{r.time_min} min</div>
+              </div>
+              <FavoriteButton recipe={{ id: r.id, title: r.title }} />
+            </div>
+
+            <p className="text-sm mt-2 line-clamp-3">{r.instructions}</p>
+
+            <div className="mt-3 flex gap-2">
+              <button
+                onClick={() => setOpenId(r.id)}
+                className="rounded border px-3 py-1 hover:bg-gray-50"
               >
-                Open source
-              </a>
-            )}
+                View Recipe
+              </button>
+            </div>
           </div>
-        </article>
-      ))}
-    </main>
+        ))}
+      </div>
+
+      {/* Modal (same look/feel as Plan) */}
+      <Modal open={!!openId} onClose={() => setOpenId(null)}>
+        {openRecipe ? (
+          <div>
+            {/* Modal header with favorite */}
+            <div className="flex items-start justify-between">
+              <h3 className="text-xl font-semibold">{openRecipe.title}</h3>
+              <FavoriteButton recipe={{ id: openRecipe.id, title: openRecipe.title }} />
+            </div>
+            <div className="text-sm text-gray-600 mb-3">{openRecipe.time_min} min</div>
+
+            <h4 className="font-medium mt-3 mb-1">Ingredients</h4>
+            <ul className="list-disc pl-5 space-y-1">
+              {openIngs.map((it, idx) => (
+                <li key={idx}>
+                  {it.qty ?? ''} {it.unit ?? ''} {it.name}
+                  {it.optional ? ' (optional)' : ''}
+                </li>
+              ))}
+              {openIngs.length === 0 && (
+                <li className="text-gray-500">No ingredients listed.</li>
+              )}
+            </ul>
+
+            <h4 className="font-medium mt-4 mb-1">Instructions</h4>
+            <p className="whitespace-pre-wrap leading-relaxed">
+              {openRecipe.instructions}
+            </p>
+
+            <div className="mt-4 text-right">
+              <button
+                onClick={() => setOpenId(null)}
+                className="rounded border px-4 py-2 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </Modal>
+    </div>
+  );
+}
+
+/** Simple modal component (same as Plan) */
+function Modal({
+  open,
+  onClose,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  children: React.ReactNode;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50">
+      {/* backdrop */}
+      <div
+        className="absolute inset-0 bg-black/40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      {/* dialog */}
+      <div className="absolute inset-0 flex items-start justify-center mt-16 px-4">
+        <div className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-lg">
+          {children}
+        </div>
+      </div>
+    </div>
   );
 }
