@@ -9,7 +9,7 @@ export default function LoginClient() {
   const router = useRouter();
   const params = useSearchParams();
 
-  // default to /pantry if no ?redirect=
+  // keep redirect functionality, just don't display it
   const redirect = useMemo(() => params.get("redirect") || "/pantry", [params]);
 
   const [email, setEmail] = useState("");
@@ -39,8 +39,7 @@ export default function LoginClient() {
   return (
     <div className="min-h-[70vh] grid place-items-center px-6">
       <div className="w-full max-w-sm">
-        <h1 className="text-2xl font-semibold mb-1">Login</h1>
-        <p className="text-sm opacity-70 mb-4">You’ll be redirected to: {redirect}</p>
+        <h1 className="text-2xl font-semibold mb-4">Login</h1>
 
         <form onSubmit={onSubmit} className="space-y-3">
           <input
