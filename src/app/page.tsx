@@ -4,7 +4,7 @@ export default function Home() {
   return (
     <main className="min-h-screen grid place-items-center bg-white">
       <section className="text-center px-6">
-        <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight">MealSnap</h1>
+        <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight">MealCue</h1>
         <p className="mt-2 text-sm md:text-base opacity-70">Cook smarter. Waste less.</p>
 
         <p className="mt-6 max-w-2xl mx-auto text-base md:text-lg opacity-80 leading-relaxed">

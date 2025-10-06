@@ -22,7 +22,7 @@ export default function Nav() {
     <nav className="w-full border-b bg-white">
       <div className="mx-auto max-w-4xl flex items-center justify-between p-4">
         <div className="flex items-center gap-4">
-          <Link className="font-semibold" href="/">MealSnap</Link>
+          <Link className="font-semibold" href="/">MealCue</Link>
           {email && (
             <>
               <Link className="text-sm hover:underline" href="/preferences">Preferences</Link>

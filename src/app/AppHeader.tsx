@@ -55,7 +55,7 @@ export default function AppHeader() {
       <nav className="mx-auto max-w-5xl h-12 px-4 flex items-center justify-between">
         {/* Left: Brand */}
         <Link href="/pantry" className="font-semibold tracking-tight">
-          MealSnap
+          MealCue
         </Link>
 
         {/* Middle: Primary links */}
