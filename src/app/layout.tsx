@@ -3,7 +3,7 @@ import type { Metadata } from 'next';
 import AppHeader from './AppHeader';
 
 export const metadata: Metadata = {
-  title: 'MealSnap',
+  title: 'MealCue',
   description: 'Turn what you already have into great meals—faster, cheaper, with less waste.',
 };
 
