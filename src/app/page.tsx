@@ -1,27 +1,40 @@
+// src/app/page.tsx
 import Link from "next/link";
 
 export default function Home() {
   return (
-    <main className="min-h-screen grid place-items-center bg-white">
-      <section className="text-center px-6">
-        <h1 className="text-5xl md:text-7xl font-extrabold tracking-tight">MealCue</h1>
-        <p className="mt-2 text-sm md:text-base opacity-70">Cook smarter. Waste less.</p>
+    <main className="min-h-[70vh] grid place-items-center px-6">
+      <div className="text-center max-w-3xl">
+        <h1 className="text-5xl sm:text-7xl font-extrabold tracking-tight
+                       text-gray-900 dark:text-gray-100">
+          MealCue
+        </h1>
 
-        <p className="mt-6 max-w-2xl mx-auto text-base md:text-lg opacity-80 leading-relaxed">
-          <strong>Our mission:</strong> make everyday cooking effortless by turning what’s already in your pantry
-          into delicious, practical meals. We help you track ingredients, discover smart recipes, and cut food waste—
-          so you save time, money, and headspace.
+        <p className="mt-3 text-xl text-gray-700 dark:text-gray-300">
+          Cook smarter. Waste less.
         </p>
 
-        <div className="mt-8 flex items-center justify-center">
+        <p className="mt-8 text-lg leading-relaxed
+                      text-gray-600 dark:text-gray-400">
+          <span className="font-semibold">Our mission:</span> make everyday
+          cooking effortless by turning what’s already in your pantry into
+          delicious, practical meals. We help you track ingredients, discover
+          smart recipes, and cut food waste—so you save time, money, and
+          headspace.
+        </p>
+
+        <div className="mt-10">
           <Link
             href="/login"
-            className="rounded-2xl px-6 py-3 bg-black text-white hover:opacity-90 transition"
+            className="inline-flex items-center justify-center rounded-2xl
+                       px-6 py-3 text-base font-medium
+                       bg-black text-white hover:opacity-90
+                       dark:bg-white dark:text-black"
           >
             Sign in
           </Link>
         </div>
-      </section>
+      </div>
     </main>
   );
 }
