@@ -1,79 +1,53 @@
 'use client';
-import { useEffect, useMemo, useState } from 'react';
+
+import { useEffect, useMemo, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
-import FavoriteButton from '@/components/FavoriteButton'; // ← NEW
+import FavoriteButton from '@/components/FavoriteButton';
 
-type Recipe = { id: string; title: string; time_min: number; diet_tags: string[] | null; instructions: string; };
-type Ing = { recipe_id: string; name: string; qty: number | null; unit: string | null; optional: boolean; };
+type Recipe = { id: string; title: string; time_min: number; diet_tags: string[] | null; instructions: string };
+type Ing = { recipe_id: string; name: string; qty: number | null; unit: string | null; optional: boolean };
+type Prefs = { diet: string; allergies: string[]; dislikes: string[]; max_prep_minutes: number; budget_level: string; updated_at?: string };
+type PantryRow = { name: string; updated_at: string };
+type PlanItem = { recipe_id: string; position: number };
+type PlanHeader = { id: string; generated_at: string; user_meal_plan_recipes?: PlanItem[] };
 
 export default function PlanPage() {
   useRequireAuth();
 
   const [loading, setLoading] = useState(true);
-  const [pantry, setPantry] = useState<string[]>([]);
-  const [prefs, setPrefs] = useState<{ diet: string; allergies: string[]; dislikes: string[]; max_prep_minutes: number; budget_level: string } | null>(null);
+  const [userId, setUserId] = useState<string | null>(null);
+
+  const [pantry, setPantry] = useState<PantryRow[]>([]);
+  const [prefs, setPrefs] = useState<Prefs | null>(null);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [ings, setIngs] = useState<Ing[]>([]);
+
   const [meals, setMeals] = useState<Recipe[]>([]);
   const [shopping, setShopping] = useState<{ name: string; qty: number; unit: string }[]>([]);
+  const [planMeta, setPlanMeta] = useState<{ id: string; generated_at: string } | null>(null);
+  const [stale, setStale] = useState(false);
 
   // Modal state
   const [openId, setOpenId] = useState<string | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      const [pItems, pRes, rRes, iRes] = await Promise.all([
-        supabase.from('pantry_items').select('name'),
-        supabase.from('preferences').select('*').maybeSingle(),
-        supabase.from('recipes').select('id,title,time_min,diet_tags,instructions'),
-        supabase.from('recipe_ingredients').select('recipe_id,name,qty,unit,optional'),
-      ]);
-      setPantry((pItems.data || []).map(x => x.name.toLowerCase()));
-      setPrefs(pRes.data ?? { diet: 'none', allergies: [], dislikes: [], max_prep_minutes: 45, budget_level: 'medium' });
-      setRecipes(rRes.data || []);
-      setIngs(iRes.data || []);
-      setLoading(false);
-    })();
-  }, []);
-
-  function scoreAndPick() {
-    if (!prefs) return;
-    const ingByRecipe = new Map<string, Ing[]>();
+  // Build an index of ingredients by recipe for quick lookups
+  const ingByRecipe = useMemo(() => {
+    const m = new Map<string, Ing[]>();
     ings.forEach(i => {
-      const arr = ingByRecipe.get(i.recipe_id) || [];
-      arr.push(i); ingByRecipe.set(i.recipe_id, arr);
+      const arr = m.get(i.recipe_id) || [];
+      arr.push(i);
+      m.set(i.recipe_id, arr);
     });
+    return m;
+  }, [ings]);
 
-    const allergy = new Set(prefs.allergies.map(a => a.toLowerCase()));
-    const dislike = new Set(prefs.dislikes.map(d => d.toLowerCase()));
-    const pantrySet = new Set(pantry);
-
-    const scored = recipes.map(r => {
-      const ri = ingByRecipe.get(r.id) || [];
-      let score = 0;
-      // prefer faster recipes
-      score += r.time_min <= (prefs.max_prep_minutes ?? 45) ? 2 : -2;
-      // simple diet match boost
-      if (prefs.diet !== 'none' && (r.diet_tags || []).includes(prefs.diet)) score += 1;
-      // pantry usage / avoid allergens / dislikes
-      for (const it of ri) {
-        const name = it.name.toLowerCase();
-        if (pantrySet.has(name)) score += 1;
-        if (allergy.has(name)) return { r, score: -999, ri }; // hard reject
-        if (dislike.has(name)) score -= 2;
-      }
-      return { r, score, ri };
-    })
-    .filter(x => x.score > -500)
-    .sort((a,b) => b.score - a.score);
-
-    const chosen = scored.slice(0, 7).map(x => x.r);
-    setMeals(chosen);
-
-    // build shopping list for chosen
+  // Recompute shopping list from chosen meals + current pantry
+  const recomputeShopping = useCallback((chosen: Recipe[]) => {
+    const pantrySet = new Set(pantry.map(p => p.name.toLowerCase()));
     const need = new Map<string, { name: string; qty: number; unit: string }>();
-    for (const { r } of scored.slice(0, 7)) {
+
+    for (const r of chosen) {
       const ri = ingByRecipe.get(r.id) || [];
       for (const it of ri) {
         const name = it.name.toLowerCase();
@@ -85,20 +59,133 @@ export default function PlanPage() {
       }
     }
     setShopping(Array.from(need.values()));
-  }
+  }, [ingByRecipe, pantry]);
 
-  // helpers to show recipe detail
-  const ingByRecipe = useMemo(() => {
-    const m = new Map<string, Ing[]>();
+  // Keep shopping list in sync when meals or ingredients change
+  useEffect(() => {
+    if (meals.length) recomputeShopping(meals);
+  }, [meals, recomputeShopping]);
+
+  // Initial load: user + pantry/prefs/recipes/ings + latest saved plan
+  useEffect(() => {
+    (async () => {
+      const { data: auth } = await supabase.auth.getUser();
+      const uid = auth.user?.id ?? null;
+      setUserId(uid);
+      if (!uid) { setLoading(false); return; }
+
+      const [pItems, pRes, rRes, iRes] = await Promise.all([
+        supabase.from('pantry_items').select('name,updated_at'),
+        supabase.from('preferences').select('*').maybeSingle(),
+        supabase.from('recipes').select('id,title,time_min,diet_tags,instructions'),
+        supabase.from('recipe_ingredients').select('recipe_id,name,qty,unit,optional'),
+      ]);
+
+      const pantryRows: PantryRow[] = (pItems.data || []).map(x => ({
+        name: String(x.name).toLowerCase(),
+        updated_at: x.updated_at || new Date(0).toISOString(),
+      }));
+      setPantry(pantryRows);
+
+      const prefsRow: Prefs = pRes.data ?? {
+        diet: 'none',
+        allergies: [],
+        dislikes: [],
+        max_prep_minutes: 45,
+        budget_level: 'medium',
+      };
+      setPrefs(prefsRow);
+
+      const recipeRows: Recipe[] = rRes.data || [];
+      setRecipes(recipeRows);
+      setIngs(iRes.data || []);
+
+      // Load latest saved plan (+ items)
+      const { data: plan } = await supabase
+        .from('user_meal_plan')
+        .select('id, generated_at, user_meal_plan_recipes (recipe_id, position)')
+        .eq('user_id', uid)
+        .order('generated_at', { ascending: false })
+        .limit(1)
+        .maybeSingle<PlanHeader>();
+
+      if (plan) {
+        const byId = new Map(recipeRows.map(r => [r.id, r]));
+        const items = (plan.user_meal_plan_recipes || []).slice().sort((a, b) => a.position - b.position);
+        const chosen = items.map(it => byId.get(it.recipe_id)).filter(Boolean) as Recipe[];
+        setMeals(chosen);
+        setPlanMeta({ id: plan.id, generated_at: plan.generated_at });
+
+        // Staleness: if pantry/prefs changed after plan.generated_at
+        const pantryMax = pantryRows.length ? Math.max(...pantryRows.map(p => Date.parse(p.updated_at))) : 0;
+        const prefsUpdated = prefsRow.updated_at ? Date.parse(prefsRow.updated_at) : 0;
+        const planTs = Date.parse(plan.generated_at);
+        setStale(pantryMax > planTs || prefsUpdated > planTs);
+      }
+
+      setLoading(false);
+    })();
+  }, []);
+
+  // Generate a fresh plan and persist it
+  const generateAndSave = useCallback(async () => {
+    if (!prefs || !userId) return;
+
+    // Build indexes for scoring
+    const allergy = new Set((prefs.allergies || []).map(a => a.toLowerCase()));
+    const dislike = new Set((prefs.dislikes || []).map(d => d.toLowerCase()));
+    const pantrySet = new Set(pantry.map(p => p.name));
+
+    const ingIndex = new Map<string, Ing[]>();
     ings.forEach(i => {
-      const arr = m.get(i.recipe_id) || [];
-      arr.push(i); m.set(i.recipe_id, arr);
+      const arr = ingIndex.get(i.recipe_id) || [];
+      arr.push(i); ingIndex.set(i.recipe_id, arr);
     });
-    return m;
-  }, [ings]);
 
-  const openRecipe = meals.find(m => m.id === openId) || null;
-  const openIngs = openId ? (ingByRecipe.get(openId) || []) : [];
+    const scored = recipes.map(r => {
+      const ri = ingIndex.get(r.id) || [];
+      let score = 0;
+      // prefer faster recipes
+      score += r.time_min <= (prefs.max_prep_minutes ?? 45) ? 2 : -2;
+      // diet tag boost
+      if (prefs.diet !== 'none' && (r.diet_tags || []).includes(prefs.diet)) score += 1;
+      // pantry usage / avoid allergens / dislikes
+      for (const it of ri) {
+        const name = it.name.toLowerCase();
+        if (pantrySet.has(name)) score += 1;
+        if (allergy.has(name)) return { r, score: -999, ri };
+        if (dislike.has(name)) score -= 2;
+      }
+      return { r, score, ri };
+    })
+    .filter(x => x.score > -500)
+    .sort((a, b) => b.score - a.score);
+
+    const chosen = scored.slice(0, 7).map(x => x.r);
+
+    // 1) create plan header
+    const { data: planRow, error: planErr } = await supabase
+      .from('user_meal_plan')
+      .insert({ user_id: userId })
+      .select('id,generated_at')
+      .single();
+    if (planErr || !planRow) { console.error(planErr); return; }
+
+    // 2) insert plan items
+    const itemsPayload = chosen.map((r, idx) => ({
+      plan_id: planRow.id,
+      recipe_id: r.id,
+      position: idx,
+    }));
+    const { error: itemsErr } = await supabase.from('user_meal_plan_recipes').insert(itemsPayload);
+    if (itemsErr) { console.error(itemsErr); return; }
+
+    // 3) update UI
+    setMeals(chosen);
+    setPlanMeta({ id: planRow.id, generated_at: planRow.generated_at });
+    setStale(false);
+    recomputeShopping(chosen);
+  }, [prefs, userId, pantry, ings, recipes, recomputeShopping]);
 
   function downloadCSV() {
     const header = 'name,qty,unit';
@@ -113,10 +200,29 @@ export default function PlanPage() {
 
   if (loading) return <p>Loading…</p>;
 
+  const openRecipe = meals.find(m => m.id === openId) || null;
+  const openIngs = openId ? (ingByRecipe.get(openId) || []) : [];
+  const generatedLabel = planMeta ? new Date(planMeta.generated_at).toLocaleString() : null;
+
   return (
     <div className="max-w-3xl">
-      <h1 className="text-2xl font-semibold mb-4">Your 7-Day Plan</h1>
-      <button onClick={scoreAndPick} className="rounded bg-black text-white px-4 py-2">Generate Plan</button>
+      <div className="flex items-start justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold mb-1">Your 7-Day Plan</h1>
+          {generatedLabel && !stale && (
+            <p className="text-sm text-gray-600">Generated on {generatedLabel}</p>
+          )}
+          {stale && (
+            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-sm">
+              Your pantry or preferences changed since this plan was created.
+              <span className="ml-2 font-medium">Regenerate to refresh.</span>
+            </div>
+          )}
+        </div>
+        <button onClick={generateAndSave} className="rounded bg-black text-white px-4 py-2">
+          {meals.length ? 'Regenerate plan' : 'Generate plan'}
+        </button>
+      </div>
 
       {meals.length > 0 && (
         <>
@@ -124,13 +230,12 @@ export default function PlanPage() {
           <div className="grid md:grid-cols-2 gap-4">
             {meals.map(m => (
               <div key={m.id} className="border rounded p-3">
-                {/* Card header with favorite */}
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="font-medium">{m.title}</div>
                     <div className="text-sm text-gray-600">{m.time_min} min</div>
                   </div>
-                  <FavoriteButton recipe={{ id: m.id, title: m.title }} /> {/* ← NEW */}
+                  <FavoriteButton recipe={{ id: m.id, title: m.title }} />
                 </div>
 
                 <p className="text-sm mt-2 line-clamp-3">{m.instructions}</p>
@@ -176,10 +281,9 @@ export default function PlanPage() {
       <Modal open={!!openId} onClose={() => setOpenId(null)}>
         {openRecipe ? (
           <div>
-            {/* Modal header with favorite */}
             <div className="flex items-start justify-between">
               <h3 className="text-xl font-semibold">{openRecipe.title}</h3>
-              <FavoriteButton recipe={{ id: openRecipe.id, title: openRecipe.title }} /> {/* ← NEW */}
+              <FavoriteButton recipe={{ id: openRecipe.id, title: openRecipe.title }} />
             </div>
             <div className="text-sm text-gray-600 mb-3">{openRecipe.time_min} min</div>
 
@@ -214,11 +318,7 @@ function Modal({ open, onClose, children }: { open: boolean; onClose: () => void
   return (
     <div className="fixed inset-0 z-50">
       {/* backdrop */}
-      <div
-        className="absolute inset-0 bg-black/40"
-        onClick={onClose}
-        aria-hidden="true"
-      />
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden="true" />
       {/* dialog */}
       <div className="absolute inset-0 flex items-start justify-center mt-16 px-4">
         <div className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-lg">
