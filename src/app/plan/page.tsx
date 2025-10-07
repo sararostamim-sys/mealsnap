@@ -220,7 +220,14 @@ export default function PlanPage() {
             </div>
           )}
         </div>
-        <button onClick={generateAndSave} className="rounded bg-black text-white px-4 py-2">
+
+        {/* ✅ Dark-mode friendly primary button */}
+        <button
+          onClick={generateAndSave}
+          className="rounded px-4 py-2
+                     bg-black text-white hover:opacity-90
+                     dark:bg-white dark:text-black"
+        >
           {meals.length ? 'Regenerate plan' : 'Generate plan'}
         </button>
       </div>
