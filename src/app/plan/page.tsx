@@ -153,7 +153,7 @@ export default function PlanPage() {
       for (const it of ri) {
         const name = it.name.toLowerCase();
         if (pantrySet.has(name)) score += 1;
-        if (allergy.has(name)) return { r, score: -999, ri };
+        if (allergy.has(name)) return { r, score: -999, ri }; // hard reject
         if (dislike.has(name)) score -= 2;
       }
       return { r, score, ri };
@@ -210,10 +210,11 @@ export default function PlanPage() {
         <div>
           <h1 className="text-2xl font-semibold mb-1">Your 7-Day Plan</h1>
           {generatedLabel && !stale && (
-            <p className="text-sm text-gray-600">Generated on {generatedLabel}</p>
+            <p className="text-sm text-gray-600 dark:text-gray-400">Generated on {generatedLabel}</p>
           )}
           {stale && (
-            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-sm">
+            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-sm
+                            dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100">
               Your pantry or preferences changed since this plan was created.
               <span className="ml-2 font-medium">Regenerate to refresh.</span>
             </div>
@@ -229,11 +230,14 @@ export default function PlanPage() {
           <h2 className="text-xl font-semibold mt-6 mb-2">Meals</h2>
           <div className="grid md:grid-cols-2 gap-4">
             {meals.map(m => (
-              <div key={m.id} className="border rounded p-3">
+              <div
+                key={m.id}
+                className="border rounded p-3 border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900"
+              >
                 <div className="flex items-start justify-between">
                   <div>
                     <div className="font-medium">{m.title}</div>
-                    <div className="text-sm text-gray-600">{m.time_min} min</div>
+                    <div className="text-sm text-gray-600 dark:text-gray-400">{m.time_min} min</div>
                   </div>
                   <FavoriteButton recipe={{ id: m.id, title: m.title }} />
                 </div>
@@ -242,7 +246,7 @@ export default function PlanPage() {
                 <div className="mt-3 flex gap-2">
                   <button
                     onClick={() => setOpenId(m.id)}
-                    className="rounded border px-3 py-1 hover:bg-gray-50"
+                    className="rounded border px-3 py-1 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-neutral-800"
                   >
                     View Recipe
                   </button>
@@ -252,8 +256,8 @@ export default function PlanPage() {
           </div>
 
           <h2 className="text-xl font-semibold mt-6 mb-2">Shopping List</h2>
-          <table className="w-full text-sm border">
-            <thead className="bg-gray-50">
+          <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
+            <thead className="bg-gray-50 dark:bg-neutral-900">
               <tr>
                 <th className="text-left p-2">Item</th>
                 <th className="text-left p-2">Qty</th>
@@ -262,7 +266,7 @@ export default function PlanPage() {
             </thead>
             <tbody>
               {shopping.map((s, idx) => (
-                <tr key={idx} className="border-t">
+                <tr key={idx} className="border-t border-gray-200 dark:border-gray-800">
                   <td className="p-2">{s.name}</td>
                   <td className="p-2">{s.qty}</td>
                   <td className="p-2">{s.unit}</td>
@@ -271,7 +275,10 @@ export default function PlanPage() {
             </tbody>
           </table>
 
-          <button onClick={downloadCSV} className="mt-3 rounded border px-4 py-2 hover:bg-gray-50">
+          <button
+            onClick={downloadCSV}
+            className="mt-3 rounded border px-4 py-2 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-neutral-800"
+          >
             Download CSV
           </button>
         </>
@@ -285,7 +292,7 @@ export default function PlanPage() {
               <h3 className="text-xl font-semibold">{openRecipe.title}</h3>
               <FavoriteButton recipe={{ id: openRecipe.id, title: openRecipe.title }} />
             </div>
-            <div className="text-sm text-gray-600 mb-3">{openRecipe.time_min} min</div>
+            <div className="text-sm text-gray-600 dark:text-gray-400 mb-3">{openRecipe.time_min} min</div>
 
             <h4 className="font-medium mt-3 mb-1">Ingredients</h4>
             <ul className="list-disc pl-5 space-y-1">
@@ -294,14 +301,17 @@ export default function PlanPage() {
                   {it.qty ?? ''} {it.unit ?? ''} {it.name}{it.optional ? ' (optional)' : ''}
                 </li>
               ))}
-              {openIngs.length === 0 && <li className="text-gray-500">No ingredients listed.</li>}
+              {openIngs.length === 0 && <li className="text-gray-500 dark:text-gray-400">No ingredients listed.</li>}
             </ul>
 
             <h4 className="font-medium mt-4 mb-1">Instructions</h4>
             <p className="whitespace-pre-wrap leading-relaxed">{openRecipe.instructions}</p>
 
             <div className="mt-4 text-right">
-              <button onClick={() => setOpenId(null)} className="rounded border px-4 py-2 hover:bg-gray-50">
+              <button
+                onClick={() => setOpenId(null)}
+                className="rounded border px-4 py-2 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-neutral-800"
+              >
                 Close
               </button>
             </div>
@@ -321,7 +331,7 @@ function Modal({ open, onClose, children }: { open: boolean; onClose: () => void
       <div className="absolute inset-0 bg-black/40" onClick={onClose} aria-hidden="true" />
       {/* dialog */}
       <div className="absolute inset-0 flex items-start justify-center mt-16 px-4">
-        <div className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-lg">
+        <div className="w-full max-w-2xl rounded-lg bg-white dark:bg-neutral-900 p-6 shadow-lg border border-gray-200 dark:border-gray-800">
           {children}
         </div>
       </div>

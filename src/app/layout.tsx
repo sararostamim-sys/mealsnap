@@ -23,12 +23,22 @@ export const metadata: Metadata = {
     description:
       'Turn what you already have into great meals—faster, cheaper, with less waste.',
   },
+  // Address bar / OS theme color for both schemes
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
+    { media: '(prefers-color-scheme: dark)', color: '#0a0a0a' },
+  ],
+  // Hint to browsers that both color schemes are supported
+  other: {
+    'color-scheme': 'light dark',
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className="min-h-screen bg-white">
+      {/* System dark mode support via Tailwind's `dark:` variants */}
+      <body className="min-h-screen bg-white text-gray-900 dark:bg-neutral-950 dark:text-gray-100">
         <AppHeader />
         {children}
         <Analytics />
