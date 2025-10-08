@@ -221,7 +221,7 @@ export default function PlanPage() {
           )}
         </div>
 
-        {/* ✅ Dark-mode friendly primary button */}
+        {/* Primary button (dark-mode friendly) */}
         <button
           onClick={generateAndSave}
           className="rounded px-4 py-2
@@ -282,12 +282,17 @@ export default function PlanPage() {
             </tbody>
           </table>
 
-          <button
-            onClick={downloadCSV}
-            className="mt-3 rounded border px-4 py-2 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-neutral-800"
-          >
-            Download CSV
-          </button>
+          {/* Download CSV matches primary button style, right-aligned */}
+          <div className="mt-3 flex justify-end">
+            <button
+              onClick={downloadCSV}
+              className="rounded px-4 py-2
+                         bg-black text-white hover:opacity-90
+                         dark:bg-white dark:text-black"
+            >
+              Download CSV
+            </button>
+          </div>
         </>
       )}
 
