@@ -282,8 +282,8 @@ export default function PlanPage() {
             </tbody>
           </table>
 
-          {/* Download CSV matches primary button style, right-aligned */}
-          <div className="mt-3 flex justify-end">
+          {/* Download CSV matches primary button style, bottom-left */}
+          <div className="mt-3">
             <button
               onClick={downloadCSV}
               className="rounded px-4 py-2
