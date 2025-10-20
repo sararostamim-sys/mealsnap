@@ -1,0 +1,6 @@
+[
+  { "id": "pasta-farfalle-traderjoes", "brand": "Trader Joe's", "name": "Farfalle Pasta", "category": "pasta" },
+  { "id": "pasta-spaghetti-barilla",   "brand": "Barilla",       "name": "Spaghetti",     "category": "pasta" },
+  { "id": "cereal-cheerios-gm",        "brand": "General Mills", "name": "Cheerios",      "category": "cereal" },
+  { "id": "sauce-marinara-raos",       "brand": "Rao's",         "name": "Marinara",      "category": "sauce" }
+]

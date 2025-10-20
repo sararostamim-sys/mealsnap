@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
+import { getDevUserId } from '@/lib/user';
 
 type Prefs = {
   user_id?: string;
@@ -28,40 +29,65 @@ export default function PreferencesPage() {
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
 
+  /** Resolve current user id (auth → env fallback) */
+  async function resolveUserId(): Promise<string> {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id ?? getDevUserId();
+  }
+
+  // Load existing preferences for this user
   useEffect(() => {
     (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const userId = await resolveUserId();
       const { data } = await supabase
         .from('preferences')
         .select('*')
-        .eq('user_id', user.id)
+        .eq('user_id', userId)
         .maybeSingle();
-      if (data) setPrefs({ ...data });
+      if (data) {
+        setPrefs({
+          user_id: data.user_id,
+          diet: data.diet ?? 'none',
+          allergies: data.allergies ?? [],
+          dislikes: data.disliked_ingredients ?? [], // map from DB
+          max_prep_minutes: data.max_prep_time ?? 45,
+          budget_level: data.budget_level ?? 'medium',
+        });
+      }
       setLoading(false);
     })();
   }, []);
 
+  // Toggle allergy/dislike chips
   function editList(field: 'allergies' | 'dislikes', value: string) {
     const cur = new Set(prefs[field]);
     if (cur.has(value)) cur.delete(value); else cur.add(value);
     setPrefs({ ...prefs, [field]: Array.from(cur) });
   }
 
+  // Save or update preferences
   async function save() {
     setSaved(false);
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return;
-    const payload: Prefs = { ...prefs, user_id: user.id };
-    const { error } = await supabase.from('preferences').upsert(payload);
+    const userId = await resolveUserId();
+
+    const payload = {
+      user_id: userId,
+      diet: prefs.diet,
+      allergies: prefs.allergies,
+      disliked_ingredients: prefs.dislikes, // map back to DB column
+      max_prep_time: prefs.max_prep_minutes,
+      budget_level: prefs.budget_level,
+    };
+
+    const { error } = await supabase.from('preferences').upsert(payload, { onConflict: 'user_id' });
     if (!error) setSaved(true);
+    else console.error(error);
   }
 
   if (loading) return <p>Loading…</p>;
 
-  // chip styles
-  const chipBase =
-    'px-3 py-1.5 rounded-md border text-sm transition';
+  // style helpers
+  const chipBase = 'px-3 py-1.5 rounded-md border text-sm transition';
   const chipOff =
     'border-gray-300 dark:border-gray-700 ' +
     'bg-white dark:bg-neutral-900 ' +
@@ -94,9 +120,7 @@ export default function PreferencesPage() {
             onChange={(e) => setPrefs((p) => ({ ...p, diet: e.target.value }))}
           >
             {DIETS.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
+              <option key={d} value={d}>{d}</option>
             ))}
           </select>
         </div>
@@ -162,9 +186,7 @@ export default function PreferencesPage() {
               onChange={(e) => setPrefs((p) => ({ ...p, budget_level: e.target.value }))}
             >
               {BUDGET.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
+                <option key={b} value={b}>{b}</option>
               ))}
             </select>
           </div>

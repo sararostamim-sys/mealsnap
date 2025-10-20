@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useTransition } from 'react';
 import { supabase } from '@/lib/supabase';
+import { getDevUserId } from '@/lib/user';
 
 type RecipeLite = {
   id: string;
@@ -15,48 +16,59 @@ export default function FavoriteButton({ recipe }: { recipe: RecipeLite }) {
   const [isFav, setIsFav] = useState<boolean | null>(null);
   const [pending, startTransition] = useTransition();
 
-  // Load initial favorite state
+  /** Resolve current user id: prefer Supabase Auth, fall back to .env dev id */
+  async function resolveUserId(): Promise<string> {
+    const { data: { user } } = await supabase.auth.getUser();
+    return user?.id ?? getDevUserId();
+  }
+
+  // Load initial favorite state (scoped to current user)
   useEffect(() => {
     let alive = true;
     (async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) { setIsFav(false); return; }
-      const { data } = await supabase
+      const userId = await resolveUserId();
+      const { data, error } = await supabase
         .from('favorites')
         .select('id')
-        .eq('user_id', user.id)
+        .eq('user_id', userId)
         .eq('recipe_id', recipe.id)
         .maybeSingle();
-      if (alive) setIsFav(Boolean(data));
+
+      if (!alive) return;
+      if (error) {
+        console.error(error);
+        setIsFav(false);
+        return;
+      }
+      setIsFav(Boolean(data));
     })();
     return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recipe.id]);
 
   async function toggle() {
     startTransition(async () => {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) {
-        window.location.href = `/login?redirect=/favorites`;
-        return;
-      }
+      const userId = await resolveUserId();
 
       if (isFav) {
-        await supabase
+        const { error } = await supabase
           .from('favorites')
           .delete()
-          .eq('user_id', user.id)
+          .eq('user_id', userId)
           .eq('recipe_id', recipe.id);
-        setIsFav(false);
+        if (!error) setIsFav(false);
+        else console.error(error);
       } else {
-        await supabase.from('favorites').insert({
-          user_id: user.id,
+        const { error } = await supabase.from('favorites').insert({
+          user_id: userId,
           recipe_id: recipe.id,
           title: recipe.title,
           image_url: recipe.image_url ?? null,
           source_url: recipe.source_url ?? null,
           data: recipe.data ?? null,
         });
-        setIsFav(true);
+        if (!error) setIsFav(true);
+        else console.error(error);
       }
     });
   }
