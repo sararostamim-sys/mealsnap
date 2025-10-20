@@ -1,9 +1,6 @@
 // src/app/api/vision/route.ts
 import { NextResponse } from 'next/server';
-import {
-  detectLabelsFromBuffer,
-  detectTextFromBuffer,
-} from '../../../lib/vision';
+import { detectLabelsFromBuffer, detectTextFromBuffer } from '../../../lib/vision';
 
 export const runtime = 'nodejs';        // required for @google-cloud/vision
 export const maxDuration = 30;          // generous timeout for big images
@@ -26,8 +23,8 @@ export async function POST(req: Request) {
     }
 
     // Basic guards
-    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'];
-    if (file.type && !allowed.includes(file.type)) {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'image/jpg'] as const;
+    if (file.type && !allowed.includes(file.type as (typeof allowed)[number])) {
       return NextResponse.json({ error: `Unsupported content-type: ${file.type}` }, { status: 415 });
     }
     if (file.size > 8 * 1024 * 1024) {
@@ -44,7 +41,12 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: true, labels, text });
   } catch (err: unknown) {
     // Surface useful errors from Google SDK (PERMISSION_DENIED, UNAUTHENTICATED, etc.)
-    const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : 'Unknown error';
+    const msg =
+      err instanceof Error
+        ? err.message
+        : typeof err === 'string'
+        ? err
+        : 'Vision API error';
     console.error('Vision API error:', msg);
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }
