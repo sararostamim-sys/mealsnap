@@ -1,13 +1,40 @@
-// app/api/ocr/route.ts
+// src/app/api/ocr/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import sharp from 'sharp';
-import Tesseract from 'tesseract.js';
+// NOTE: we lazy-load tesseract.js below to avoid build/bundle issues.
+// import Tesseract from 'tesseract.js';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 export const maxDuration = 60;
 
+/** ---------------- Tesseract typed lazy loader ---------------- */
+type TessWord = {
+  text: string;
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+  confidence: number;
+};
+type TessData = { text?: string; words?: TessWord[]; orientation?: { degrees?: number } };
+type TessModule = {
+  recognize: (
+    image: Buffer | Uint8Array | string,
+    lang: string,
+    options?: Record<string, string | number | boolean>
+  ) => Promise<{ data: TessData }>;
+  detect: (
+    image: Buffer | Uint8Array | string
+  ) => Promise<{ data?: { orientation?: { degrees?: number } } }>;
+};
+
+async function getTesseract(): Promise<TessModule> {
+  const mod = await import('tesseract.js');
+  const maybe = mod as unknown as { default?: TessModule };
+  return maybe.default ?? (mod as unknown as TessModule);
+}
+
+/** ---------------- geometry & scoring helpers ---------------- */
 type Box = { left: number; top: number; width: number; height: number };
+
 const clamp = (b: Box, W: number, H: number): Box => ({
   left: Math.max(0, Math.min(b.left, W - 1)),
   top: Math.max(0, Math.min(b.top, H - 1)),
@@ -33,7 +60,7 @@ function score(t: string) {
   return big * 500 + uni * 120 + letters - garbage * 30;
 }
 
-const CFGS_GENERAL: Array<Record<string, string>> = [
+const CFGS_GENERAL: Array<Record<string, string | number>> = [
   {
     tessedit_pageseg_mode: '6',
     user_defined_dpi: '300',
@@ -57,24 +84,22 @@ const CFGS_GENERAL: Array<Record<string, string>> = [
   },
 ];
 
-const CFGS_SIZE_ONLY: Array<Record<string, string>> = [
+const CFGS_SIZE_ONLY: Array<Record<string, string | number>> = [
   {
     tessedit_pageseg_mode: '6',
     user_defined_dpi: '300',
     preserve_interword_spaces: '1',
-    tessedit_char_whitelist:
-      'NETWT0123456789OZFLLBGS() ./:kgmlKGMLozlb',
+    tessedit_char_whitelist: 'NETWT0123456789OZFLLBGS() ./:kgmlKGMLozlb',
   },
   {
     tessedit_pageseg_mode: '7',
     user_defined_dpi: '300',
     preserve_interword_spaces: '1',
-    tessedit_char_whitelist:
-      '0123456789OZFL LBGS() ./:kgmlKGMLozlb',
+    tessedit_char_whitelist: '0123456789OZFL LBGS() ./:kgmlKGMLozlb',
   },
 ];
 
-const CFGS_BRAND_ONLY: Array<Record<string, string>> = [
+const CFGS_BRAND_ONLY: Array<Record<string, string | number>> = [
   {
     tessedit_pageseg_mode: '7',
     user_defined_dpi: '300',
@@ -98,80 +123,35 @@ const CFGS_BRAND_ONLY: Array<Record<string, string>> = [
   },
 ];
 
-// Build oriented base + region crops
+/** ---------------- image variants ---------------- */
 async function buildVariants(input: Buffer) {
   const baseBuf = await sharp(input)
     .rotate()
     .removeAlpha()
-    .resize({
-      width: 2200,
-      height: 2200,
-      fit: 'inside',
-      withoutEnlargement: false,
-    })
+    .resize({ width: 2200, height: 2200, fit: 'inside', withoutEnlargement: false })
     .toBuffer();
 
   // Auto orientation from Tesseract
   let deg = 0;
   try {
-    const det = await (Tesseract as any).detect(baseBuf);
+    const { detect } = await getTesseract();
+    const det = await detect(baseBuf);
     deg = Math.round((det?.data?.orientation?.degrees ?? 0) / 90) * 90;
-  } catch {}
+  } catch {
+    // best-effort
+  }
   const img = sharp(baseBuf).rotate(deg);
   const meta = await img.metadata();
   const W = meta.width || 1600;
   const H = meta.height || 2000;
 
-  // General bands
-  const top = clamp(
-    { left: 0, top: Math.round(H * 0.06), width: W, height: Math.round(H * 0.26) },
-    W,
-    H
-  );
-  const mid = clamp(
-    { left: 0, top: Math.round(H * 0.42), width: W, height: Math.round(H * 0.22) },
-    W,
-    H
-  );
-  const low = clamp(
-    { left: 0, top: Math.round(H * 0.62), width: W, height: Math.round(H * 0.18) },
-    W,
-    H
-  );
-  const center = clamp(
-    {
-      left: Math.round(W * 0.15),
-      top: Math.round(H * 0.15),
-      width: Math.round(W * 0.7),
-      height: Math.round(H * 0.7),
-    },
-    W,
-    H
-  );
-
-  // Bottom-right size zone guess
-  const sizeBox = clamp(
-    {
-      left: Math.round(W * 0.6),
-      top: Math.round(H * 0.7),
-      width: Math.round(W * 0.36),
-      height: Math.round(H * 0.25),
-    },
-    W,
-    H
-  );
-
-  // Top-center brand zone
-  const brandBox = clamp(
-    {
-      left: Math.round(W * 0.15),
-      top: 0,
-      width: Math.round(W * 0.7),
-      height: Math.round(H * 0.3),
-    },
-    W,
-    H
-  );
+  // Regions
+  const top = clamp({ left: 0, top: Math.round(H * 0.06), width: W, height: Math.round(H * 0.26) }, W, H);
+  const mid = clamp({ left: 0, top: Math.round(H * 0.42), width: W, height: Math.round(H * 0.22) }, W, H);
+  const low = clamp({ left: 0, top: Math.round(H * 0.62), width: W, height: Math.round(H * 0.18) }, W, H);
+  const center = clamp({ left: Math.round(W * 0.15), top: Math.round(H * 0.15), width: Math.round(W * 0.7), height: Math.round(H * 0.7) }, W, H);
+  const sizeBox = clamp({ left: Math.round(W * 0.6), top: Math.round(H * 0.7), width: Math.round(W * 0.36), height: Math.round(H * 0.25) }, W, H);
+  const brandBox = clamp({ left: Math.round(W * 0.15), top: 0, width: Math.round(W * 0.7), height: Math.round(H * 0.3) }, W, H);
 
   const mk = (s: sharp.Sharp) => s.jpeg({ quality: 94 }).toBuffer();
 
@@ -213,31 +193,32 @@ async function buildVariants(input: Buffer) {
   await add('brand', brandBox, { thresh: 170 });
   await add('brand', brandBox, { thresh: 180, negate: true });
 
-  // Provide oriented full image buffer for ROI discovery
+  // Oriented full image for ROI
   const orientedFull = await mk(img.clone());
 
   return { general, sizeOnly, brandOnly, orientedFull, W, H };
 }
 
-// Use Tesseract word boxes to find likely size ROIs (NET WT, oz, lb, g, etc.)
+/** ---------------- ROI discovery (size area) ---------------- */
 async function findSizeROIs(fullJpeg: Buffer, W: number, H: number) {
-  const { data } = await Tesseract.recognize(fullJpeg, 'eng', {
-    langPath: 'https://tessdata.projectnaptha.com/4.0.0_best/',
-    oem: 1,
-    tessedit_pageseg_mode: '6',
-    user_defined_dpi: '300',
-    preserve_interword_spaces: '1',
-  } as any);
+  const { recognize } = await getTesseract();
+  const { data } = await recognize(
+    fullJpeg,
+    'eng',
+    {
+      langPath: 'https://tessdata.projectnaptha.com/4.0.0_best/',
+      oem: 1,
+      tessedit_pageseg_mode: '6',
+      user_defined_dpi: '300',
+      preserve_interword_spaces: '1',
+    }
+  );
 
-  const words = (data?.words || []) as Array<{
-    text: string;
-    bbox: { x0: number; y0: number; x1: number; y1: number };
-    confidence: number;
-  }>;
+  const words: TessWord[] = (data?.words || []) as TessWord[];
 
   // Score words that look like size tokens
   const anchors = words
-    .map((w) => {
+    .map((w): TessWord & { score: number } => {
       const t = (w.text || '').toLowerCase();
       const isNum = /^\d{1,4}(\.\d+)?$/.test(t);
       const unit =
@@ -250,12 +231,11 @@ async function findSizeROIs(fullJpeg: Buffer, W: number, H: number) {
         (/\blb\b/.test(t) ? 2 : 0) +
         (/\bg\b/.test(t) ? 1 : 0) +
         (/\bfl\b/.test(t) ? 1 : 0);
-      const score = (isNum ? 1 : 0) + (unit ? 1 : 0) + bonus + (w.confidence || 0) / 50;
-      return { ...w, score };
+      const sc = (isNum ? 1 : 0) + (unit ? 1 : 0) + bonus + (w.confidence || 0) / 50;
+      return { ...w, score: sc };
     })
     .filter((w) => w.score >= 2);
 
-  // Build up to 3 ROI boxes around the best anchors
   const sorted = anchors.sort((a, b) => b.score - a.score).slice(0, 6);
   const boxes: Box[] = [];
   for (const a of sorted) {
@@ -270,7 +250,7 @@ async function findSizeROIs(fullJpeg: Buffer, W: number, H: number) {
   return boxes;
 }
 
-// Create high-res, rotated, thresholded variants for each ROI
+/** ---------------- ROI variants ---------------- */
 async function makeSizeROIVariants(base: Buffer, rois: Box[]) {
   const out: Buffer[] = [];
   for (const b of rois) {
@@ -297,11 +277,13 @@ async function makeSizeROIVariants(base: Buffer, rois: Box[]) {
   return out.slice(0, 24); // cap to keep time in check
 }
 
+/** ---------------- recognizers ---------------- */
 async function recognizeGeneral(bufs: Buffer[]) {
+  const { recognize } = await getTesseract();
   const out: string[] = [];
   for (const b of bufs) {
     for (const cfg of CFGS_GENERAL) {
-      const { data } = await Tesseract.recognize(
+      const { data } = await recognize(
         b,
         'eng',
         { langPath: 'https://tessdata.projectnaptha.com/4.0.0_best/', oem: 1, ...cfg }
@@ -313,10 +295,11 @@ async function recognizeGeneral(bufs: Buffer[]) {
 }
 
 async function recognizeBrand(bufs: Buffer[]) {
+  const { recognize } = await getTesseract();
   const texts: string[] = [];
   for (const b of bufs) {
     for (const cfg of CFGS_BRAND_ONLY) {
-      const { data } = await Tesseract.recognize(
+      const { data } = await recognize(
         b,
         'eng',
         { langPath: 'https://tessdata.projectnaptha.com/4.0.0_best/', oem: 1, ...cfg }
@@ -331,10 +314,11 @@ async function recognizeBrand(bufs: Buffer[]) {
 }
 
 async function recognizeSize(bufs: Buffer[]) {
+  const { recognize } = await getTesseract();
   const texts: string[] = [];
   for (const b of bufs) {
     for (const cfg of CFGS_SIZE_ONLY) {
-      const { data } = await Tesseract.recognize(
+      const { data } = await recognize(
         b,
         'eng',
         { langPath: 'https://tessdata.projectnaptha.com/4.0.0_best/', oem: 1, ...cfg }
@@ -345,6 +329,7 @@ async function recognizeSize(bufs: Buffer[]) {
   return Array.from(new Set(texts.filter(Boolean))).join('\n');
 }
 
+/** ---------------- handler ---------------- */
 export async function POST(req: NextRequest) {
   try {
     const form = await req.formData();
@@ -361,7 +346,9 @@ export async function POST(req: NextRequest) {
       if (rois.length) {
         roiVariants = await makeSizeROIVariants(orientedFull, rois);
       }
-    } catch { /* ROI discovery is best-effort */ }
+    } catch {
+      // ROI discovery is best-effort
+    }
 
     const [generalTextTop5, brandText, sizeGuessText, sizeRoiText] = await Promise.all([
       recognizeGeneral(general),

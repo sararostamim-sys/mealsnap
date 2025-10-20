@@ -568,3 +568,6 @@ function canonicalizeBrand(b: string) {
   if (/^o\s*organics$/i.test(b)) return "O Organics";
   return b.replace(/\s+/g, ' ').trim();
 }
+
+// Re-export so older pages can import from "@/lib/normalize"
+export { draftProductFromOcrSmart as draftProductFromOcr } from './normalize_smart';

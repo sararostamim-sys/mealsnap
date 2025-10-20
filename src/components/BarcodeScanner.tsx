@@ -1,8 +1,7 @@
 // src/components/BarcodeScanner.tsx
 'use client';
 import { useEffect, useRef } from 'react';
-import { BrowserMultiFormatReader } from '@zxing/browser';
-// Enums come from @zxing/library (more reliable)
+import { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
 import { DecodeHintType, BarcodeFormat, Result } from '@zxing/library';
 
 export default function BarcodeScanner({
@@ -13,7 +12,7 @@ export default function BarcodeScanner({
   onError?: (msg: string) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const controlsRef = useRef<ReturnType<BrowserMultiFormatReader['decodeFromVideoDevice']> | null>(null);
+  const controlsRef = useRef<IScannerControls | null>(null);
   const lastAtRef = useRef<number>(0);
 
   useEffect(() => {
@@ -21,7 +20,7 @@ export default function BarcodeScanner({
 
     (async () => {
       try {
-        const hints = new Map();
+        const hints = new Map<DecodeHintType, unknown>();
         hints.set(DecodeHintType.POSSIBLE_FORMATS, [
           BarcodeFormat.EAN_13,
           BarcodeFormat.EAN_8,
@@ -37,7 +36,7 @@ export default function BarcodeScanner({
 
         // Prefer back camera when we can
         const devices = await BrowserMultiFormatReader.listVideoInputDevices();
-        const back = devices.find(d => /back|rear|environment/i.test(d.label)) ?? devices[0];
+        const back = devices.find((d) => /back|rear|environment/i.test(d.label)) ?? devices[0];
 
         controlsRef.current = await reader.decodeFromVideoDevice(
           back?.deviceId ?? null,
@@ -50,8 +49,9 @@ export default function BarcodeScanner({
             onDetected(result.getText());
           }
         );
-      } catch (e: any) {
-        onError?.(e?.message ?? String(e));
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        onError?.(msg);
       }
     })();
 
@@ -59,7 +59,9 @@ export default function BarcodeScanner({
       try {
         controlsRef.current?.stop();
         reader?.reset();
-      } catch {}
+      } catch {
+        // noop
+      }
     };
   }, [onDetected, onError]);
 
@@ -72,10 +74,10 @@ export async function decodeBarcodeFromFile(file: File): Promise<string | null> 
     const img = new Image();
     await new Promise<void>((res, rej) => {
       img.onload = () => res();
-      img.onerror = rej;
+      img.onerror = () => rej(new Error('Image load failed'));
       img.src = url;
     });
-    const hints = new Map();
+    const hints = new Map<DecodeHintType, unknown>();
     hints.set(DecodeHintType.TRY_HARDER, true);
     const reader = new BrowserMultiFormatReader(hints);
     const res = await reader.decodeFromImageElement(img);
