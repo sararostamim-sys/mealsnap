@@ -43,7 +43,7 @@ export default function FavoriteButton({ recipe }: { recipe: RecipeLite }) {
       setIsFav(Boolean(data));
     })();
     return () => { alive = false; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    
   }, [recipe.id]);
 
   async function toggle() {

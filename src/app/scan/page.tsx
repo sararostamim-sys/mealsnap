@@ -313,7 +313,7 @@ export default function ScanPage() {
       );
 
       // Base labels from OCR
-      let labels = Array.from(new Set([...useClassifier()(cleaned), ...(draftSmart.labels ?? [])]));
+      let labels = Array.from(new Set([...classifyFromText(cleaned), ...(draftSmart.labels ?? [])]));
       // Prefer subtype (e.g., Kidney Beans) over family (Beans)
       labels = labelsWithPreferredSubtype(labels, cleaned);
 
@@ -357,7 +357,7 @@ export default function ScanPage() {
         const nameNoBrand = properCaseName(stripBrandFromName(rawName, rawBrand) || rawName);
 
         // 2) Build labels from *brandless* name so classification is accurate
-        let labels = useClassifier()(`${nameNoBrand} ${rawBrand}`.trim());
+        let labels = classifyFromText(`${nameNoBrand} ${rawBrand}`.trim());
         // Prefer subtype over family
         labels = labelsWithPreferredSubtype(labels, `${nameNoBrand} ${rawBrand}`.trim());
 

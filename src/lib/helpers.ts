@@ -86,10 +86,6 @@ type UPCProduct = {
   [k: string]: unknown;
 };
 
-type UPCReturn =
-  | { ok?: boolean; found?: boolean; product?: UPCProduct; item?: UPCProduct }
-  | UPCProduct;
-
 function pickUPCProduct(x: unknown): UPCProduct | null {
   if (!x || typeof x !== 'object') return null;
   const obj = x as Record<string, unknown>;

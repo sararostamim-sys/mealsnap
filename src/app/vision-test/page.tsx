@@ -3,7 +3,8 @@
 
 import { useMemo } from 'react';
 import { asArray } from '@/lib/helpers';
-import { draftProductFromOcr, normalizeOcr, scanAllergens } from '@/lib/normalize';
+import { normalizeOcr, scanAllergens } from '@/lib/normalize';
+import { draftProductFromOcrSmart } from '@/lib/normalize_smart';
 import products from '@/data/products.json';
 import { matchCanonical } from '@/lib/match';
 
@@ -15,6 +16,10 @@ type CanonicalMatch = {
   score?: number;
 };
 
+// Light type for the catalog JSON
+type ProductSeed = { id: string; brand: string; name: string; category?: string };
+const catalog = products as unknown as ProductSeed[];
+
 export default function VisionTestPage() {
   // Demo text; in your app you likely pass OCR text into this page.
   const sampleText = `
@@ -25,8 +30,12 @@ export default function VisionTestPage() {
   `;
 
   const { draft, labelTags, allergens, matches, text } = useMemo(() => {
-    const text = normalizeOcr(sampleText || '');
-    const rawDraft = draftProductFromOcr(text || '');
+    // normalizeOcr returns an object; we want the cleaned text string
+    const norm = normalizeOcr(sampleText || '');
+    const text = norm.cleanedText || '';
+
+    // Feed the *string* into the smart drafter
+    const rawDraft = draftProductFromOcrSmart(text || '');
 
     // SAFETY: coerce to a well-formed object so reads never crash
     const draft = {
@@ -48,17 +57,21 @@ export default function VisionTestPage() {
 
     const allergens = asArray(scanAllergens(text || ''));
 
-    const matches: CanonicalMatch[] = matchCanonical({
-      brand: draft.brand,
-      name: draft.name,
-      candidates: asArray(draft.candidates), // <-- SAFE
-      products,
-    });
+    const matches = matchCanonical(
+  {
+    brand: draft.brand,
+    name: draft.name,
+    size: draft.size,
+    candidates: asArray(draft.candidates),
+  },
+  catalog,
+  { topK: 5 }
+) as CanonicalMatch[];
 
     return { draft, labelTags, allergens, matches, text };
-  }, []);
+  }, [sampleText]);
 
-  const candidateList = asArray(draft?.candidates); // <-- SAFE
+  const candidateList = asArray(draft?.candidates);
 
   return (
     <div className="max-w-3xl mx-auto px-4 py-8">

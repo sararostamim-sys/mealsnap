@@ -42,9 +42,9 @@ export async function POST(req: Request) {
     ]);
 
     return NextResponse.json({ ok: true, labels, text });
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Surface useful errors from Google SDK (PERMISSION_DENIED, UNAUTHENTICATED, etc.)
-    const msg = err?.message || String(err);
+    const msg = err instanceof Error ? err.message : typeof err === 'string' ? err : 'Unknown error';
     console.error('Vision API error:', msg);
     return NextResponse.json({ ok: false, error: msg }, { status: 500 });
   }

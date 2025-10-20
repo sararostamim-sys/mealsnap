@@ -12,6 +12,14 @@ type Prefs = { diet: string; allergies: string[]; dislikes: string[]; max_prep_m
 type PantryRow = { name: string; updated_at: string };
 type PlanItem = { recipe_id: string; position: number };
 type PlanHeader = { id: string; generated_at: string; user_meal_plan_recipes?: PlanItem[] };
+type PrefsRow = Partial<{
+  diet: string;
+  allergies: string[];
+  disliked_ingredients: string[];
+  max_prep_time: number;
+  budget_level: string;
+  updated_at: string;
+}>;
 
 export default function PlanPage() {
   useRequireAuth();
@@ -102,7 +110,7 @@ export default function PlanPage() {
       setPantry(pantryRows);
 
       // Map DB columns → local Prefs shape
-      const pr = pRes.data as any;
+      const pr = (pRes.data ?? null) as PrefsRow | null;
       const prefsRow: Prefs = pr ? {
         diet: pr.diet ?? 'none',
         allergies: pr.allergies ?? [],
@@ -148,7 +156,7 @@ export default function PlanPage() {
 
       setLoading(false);
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+
   }, []);
 
   // Generate a fresh plan and persist it

@@ -57,8 +57,12 @@ export default function BarcodeScanner({
 
     return () => {
       try {
+        // Stop the running decode loop and camera stream
         controlsRef.current?.stop();
-        reader?.reset();
+
+        // Some versions expose stopContinuousDecode on the reader — call it if present
+        type MaybeStop = { stopContinuousDecode?: () => void };
+        (reader as unknown as MaybeStop)?.stopContinuousDecode?.();
       } catch {
         // noop
       }
