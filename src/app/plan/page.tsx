@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import FavoriteButton from '@/components/FavoriteButton';
+import { getDevUserId } from '@/lib/user';
 
 type Recipe = { id: string; title: string; time_min: number; diet_tags: string[] | null; instructions: string };
 type Ing = { recipe_id: string; name: string; qty: number | null; unit: string | null; optional: boolean };
@@ -11,6 +12,14 @@ type Prefs = { diet: string; allergies: string[]; dislikes: string[]; max_prep_m
 type PantryRow = { name: string; updated_at: string };
 type PlanItem = { recipe_id: string; position: number };
 type PlanHeader = { id: string; generated_at: string; user_meal_plan_recipes?: PlanItem[] };
+type PrefsRow = Partial<{
+  diet: string;
+  allergies: string[];
+  disliked_ingredients: string[];
+  max_prep_time: number;
+  budget_level: string;
+  updated_at: string;
+}>;
 
 export default function PlanPage() {
   useRequireAuth();
@@ -30,6 +39,14 @@ export default function PlanPage() {
 
   // Modal state
   const [openId, setOpenId] = useState<string | null>(null);
+
+  /** Prefer authenticated user; fall back to .env dev id */
+  async function resolveUserId(): Promise<string> {
+    const { data: { user } } = await supabase.auth.getUser();
+    const uid = user?.id ?? getDevUserId();
+    setUserId(uid);
+    return uid;
+  }
 
   // Build an index of ingredients by recipe for quick lookups
   const ingByRecipe = useMemo(() => {
@@ -69,16 +86,21 @@ export default function PlanPage() {
   // Initial load: user + pantry/prefs/recipes/ings + latest saved plan
   useEffect(() => {
     (async () => {
-      const { data: auth } = await supabase.auth.getUser();
-      const uid = auth.user?.id ?? null;
-      setUserId(uid);
-      if (!uid) { setLoading(false); return; }
+      setLoading(true);
+      const uid = await resolveUserId();
 
       const [pItems, pRes, rRes, iRes] = await Promise.all([
-        supabase.from('pantry_items').select('name,updated_at'),
-        supabase.from('preferences').select('*').maybeSingle(),
-        supabase.from('recipes').select('id,title,time_min,diet_tags,instructions'),
-        supabase.from('recipe_ingredients').select('recipe_id,name,qty,unit,optional'),
+        supabase.from('pantry_items')
+          .select('name,updated_at')
+          .eq('user_id', uid),
+        supabase.from('preferences')
+          .select('*')
+          .eq('user_id', uid)
+          .maybeSingle(),
+        supabase.from('recipes')
+          .select('id,title,time_min,diet_tags,instructions'),
+        supabase.from('recipe_ingredients')
+          .select('recipe_id,name,qty,unit,optional'),
       ]);
 
       const pantryRows: PantryRow[] = (pItems.data || []).map(x => ({
@@ -87,7 +109,16 @@ export default function PlanPage() {
       }));
       setPantry(pantryRows);
 
-      const prefsRow: Prefs = pRes.data ?? {
+      // Map DB columns → local Prefs shape
+      const pr = (pRes.data ?? null) as PrefsRow | null;
+      const prefsRow: Prefs = pr ? {
+        diet: pr.diet ?? 'none',
+        allergies: pr.allergies ?? [],
+        dislikes: pr.disliked_ingredients ?? [],        // map from DB column
+        max_prep_minutes: pr.max_prep_time ?? 45,       // map from DB column
+        budget_level: pr.budget_level ?? 'medium',
+        updated_at: pr.updated_at ?? undefined
+      } : {
         diet: 'none',
         allergies: [],
         dislikes: [],
@@ -100,7 +131,7 @@ export default function PlanPage() {
       setRecipes(recipeRows);
       setIngs(iRes.data || []);
 
-      // Load latest saved plan (+ items)
+      // Load latest saved plan (+ items) for this user
       const { data: plan } = await supabase
         .from('user_meal_plan')
         .select('id, generated_at, user_meal_plan_recipes (recipe_id, position)')
@@ -125,6 +156,7 @@ export default function PlanPage() {
 
       setLoading(false);
     })();
+
   }, []);
 
   // Generate a fresh plan and persist it
@@ -163,7 +195,7 @@ export default function PlanPage() {
 
     const chosen = scored.slice(0, 7).map(x => x.r);
 
-    // 1) create plan header
+    // 1) create plan header (scoped to current user)
     const { data: planRow, error: planErr } = await supabase
       .from('user_meal_plan')
       .insert({ user_id: userId })

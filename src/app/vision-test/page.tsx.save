@@ -1,0 +1,38 @@
+'use client';
+import { useState } from 'react';
+
+export default function VisionTestPage() {
+  const [labels, setLabels] = useState<string[]>([]);
+  const [text, setText] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  async function onPick(e: React.ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setBusy(true); setError('');
+    try {
+      const body = new FormData();
+      body.append('file', f);
+      const res = await fetch('/api/vision', { method: 'POST', body });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json?.error || 'Upload failed');
+      setLabels(json.labels || []);
+      setText(json.text || '');
+    } catch (err: any) {
+      setError(err?.message || 'Unknown error');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="p-6 space-y-4">
+      <h1 className="text-xl font-semibold">Google Vision Test</h1>
+      <input type="file" accept="image/*" onChange={onPick} />
+      {busy && <p>Analyzing…</p>}
+      {error && <p className="text-red-600 text-sm">{error}</p>}
+
+      {!!labels.length && (
+        <section>
+          <h2 className="font-medium">Top Labels</h2>
