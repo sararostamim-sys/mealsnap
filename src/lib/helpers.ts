@@ -96,37 +96,67 @@ function tidyCase(s: string): string {
     .trim();
 }
 
-/** Heuristic default qty/unit based on common recipe conventions. */
-function guessQtyUnitFor(name: string): { qty: number; unit: string } {
-  const n = name.toLowerCase();
+/* ---------- Pasta shapes detector (for default "box") ---------- */
+const PASTA_SHAPES_RE =
+  /\b(radiatori|rigatoni|penne|fusilli|farfalle|orecchiette|spaghetti|linguine|fettuccine|rotini|shells?|elbows?|macaroni|ziti|bucatini|cavatappi|gemelli|ditalini|campanelle|conchiglie|pappardelle|tagliatelle)\b/i;
 
-  // Canned beans & similar (by can)
-  if (/\b(beans?|chickpeas?|garbanzo|kidney|black beans?)\b/.test(n)) {
+/**
+ * Decide the best (qty, unit) from detected text (name + optional size/category).
+ * Rules:
+ *  - Pasta: "box" by default; if size is present -> oz/g (lb converted to oz)
+ *  - Beans: default "can", use oz if present
+ *  - Tomatoes: count
+ *  - Chicken: lb (convert oz to lb when needed)
+ *  - Fallback: 1 unit
+ */
+function inferQtyUnit(
+  name: string,
+  size?: string | null,
+  category?: string | null
+): { qty: number; unit: string } {
+  const txt = `${name ?? ''} ${size ?? ''} ${category ?? ''}`.toLowerCase();
+
+  // Pull out explicit sizes if they exist
+  const mOz = txt.match(/(\d+(?:\.\d+)?)\s*oz\b/);
+  const mG  = txt.match(/(\d+(?:\.\d+)?)\s*g\b/);
+  const mLb = txt.match(/(\d+(?:\.\d+)?)\s*lb\b/);
+  const toNum = (m: RegExpMatchArray | null) => (m ? Number(m[1]) : NaN);
+
+  const hasPasta = /\bpasta\b/.test(txt) || PASTA_SHAPES_RE.test(txt);
+
+  // Pasta
+  if (hasPasta) {
+    if (mOz) return { qty: toNum(mOz), unit: 'oz' };
+    if (mG)  return { qty: toNum(mG),  unit: 'g' };
+    if (mLb) return { qty: Math.round(toNum(mLb) * 16), unit: 'oz' }; // 1 lb = 16 oz
+    return { qty: 1, unit: 'box' }; // dried pasta, no size found
+  }
+
+  // Beans (canned pantry)
+  if (/\b(beans?|chickpeas?|garbanzo|kidney|black beans?)\b/.test(txt)) {
+    if (mOz) return { qty: toNum(mOz), unit: 'oz' };
     return { qty: 1, unit: 'can' };
   }
 
-  // Pasta (dry weight oz; most boxes are 16 oz)
-  if (/\b(pasta|spaghetti|penne|farfalle|fusilli|rigatoni|macaroni|linguine|fettuccine|noodles?)\b/.test(n)) {
-    return { qty: 16, unit: 'oz' };
+  // Tomatoes (fresh count)
+  if (/\btomatoes?\b|\btomato\b/.test(txt)) {
+    return { qty: 1, unit: 'count' };
   }
 
-  // Rice (dry weight)
-  if (/\b(rice|basmati|jasmine|arborio|sushi)\b/.test(n)) {
+  // Chicken (weight)
+  if (/\bchicken\b/.test(txt)) {
+    if (mLb) return { qty: toNum(mLb), unit: 'lb' };
+    if (mOz) return { qty: Math.round((toNum(mOz) / 16) * 10) / 10, unit: 'lb' };
     return { qty: 1, unit: 'lb' };
   }
 
-  // Meat/Chicken in pounds
-  if (/\b(chicken|beef|pork|steak|breast|thighs?)\b/.test(n)) {
+  // Rice: dry weight default (leave as before)
+  if (/\b(rice|basmati|jasmine|arborio|sushi)\b/.test(txt)) {
     return { qty: 1, unit: 'lb' };
   }
 
-  // Produce typically by count
-  if (/\b(garlic|onions?|avocados?|lemons?|limes?)\b/.test(n)) {
-    return { qty: 1, unit: 'unit' };
-  }
-
-  // Tomatoes: if not clearly canned from above, default by count
-  if (/\btomatoes?\b/.test(n)) {
+  // Produce (general) by count
+  if (/\b(garlic|onions?|avocados?|lemons?|limes?)\b/.test(txt)) {
     return { qty: 1, unit: 'unit' };
   }
 
@@ -135,10 +165,14 @@ function guessQtyUnitFor(name: string): { qty: number; unit: string } {
 }
 
 /** Convert raw product text → Pantry row (brandless + tidy + smart qty/unit). */
-function toPantryRow(rawName: string): { name: string; qty: number; unit: string } {
+function toPantryRow(
+  rawName: string,
+  size?: string | null,
+  category?: string | null
+): { name: string; qty: number; unit: string } {
   const base = brandlessName(rawName || '');
   const clean = tidyCase(base);
-  const { qty, unit } = guessQtyUnitFor(clean);
+  const { qty, unit } = inferQtyUnit(clean, size ?? undefined, category ?? undefined);
   return { name: clean, qty, unit };
 }
 
@@ -227,11 +261,11 @@ export async function upcLookup(codeOrTerm: string): Promise<DetectedItem> {
 
   // Combine brand + name only to help recognition, then strip brand for display
   const merged = [p?.brand, p?.name].filter(Boolean).join(' ').trim() || `item ${codeOrTerm}`;
-  const row = toPantryRow(merged);
+  const row = toPantryRow(merged, p?.size as string | undefined, p?.category as string | undefined);
 
   return {
     name: row.name,       // brandless, tidy
-    qty: row.qty,         // smart default (e.g., beans -> 1 can, pasta -> 16 oz)
+    qty: row.qty,         // smart default (e.g., beans -> can, pasta -> box or oz)
     unit: row.unit,
     confidence: 0.99,
     raw: p ?? j,          // keep original payload
