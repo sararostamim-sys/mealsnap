@@ -1,13 +1,15 @@
 // src/lib/helpers.ts
 
 /** ------------------------------------------------------------------
- * Mobile UA detection (keeps your existing behavior)
+ * Mobile UA detection (keeps your existing behavior, no ts-ignore)
  * -----------------------------------------------------------------*/
 
+// Optional Chromium-only field; not present in all browsers.
 type NavigatorUA = Navigator & {
   userAgentData?: { mobile?: boolean };
 };
 
+/** Detect (roughly) if we're on a mobile user agent. */
 export function isMobileUA(): boolean {
   if (typeof navigator === 'undefined') return false;
   const nav = navigator as NavigatorUA;
@@ -24,7 +26,7 @@ export function asArray<T>(x: T | T[] | null | undefined): T[] {
 }
 
 /* ------------------------------------------------------------------
- * Pantry capture helpers
+ * Pantry capture helpers (kept, with stricter types)
  * -----------------------------------------------------------------*/
 
 export type DetectedItem = {
@@ -32,10 +34,16 @@ export type DetectedItem = {
   qty?: number;
   unit?: string;
   confidence?: number;
-  raw?: unknown;
+  raw?: unknown; // opaque payloads as unknown
 };
 
-/** Minimal brand list to strip from front of names */
+type OCRResponse = { ok?: boolean; text?: string; error?: string };
+
+/* ------------------------------------------------------------------
+ * Local normalization utilities (brandless names + tidy case + qty/unit)
+ * -----------------------------------------------------------------*/
+
+/** Common retail brands we want to strip from the front of names. */
 const BRAND_WORDS = [
   "trader joe's",
   'trader joes',
@@ -67,45 +75,39 @@ const BRAND_RE = new RegExp(
   'i'
 );
 
-/** Remove leading brand tokens and collapse punctuation/space */
+/** Remove a single leading brand token (and “Brand, product” pattern). */
 function brandlessName(input: string): string {
   let s = (input || '').trim();
   s = s.replace(BRAND_RE, '').trim();
-  // common “Brand, product” → “product”
-  s = s.replace(/^[^,]+,\s*(.+)$/i, '$1').trim();
-  // collapse repeated brand mentions
-  s = s.replace(/\b(?:trader joe'?s)\b\s*\1?/gi, "trader joe's");
-  // remove stray punctuation and extra spaces
+  s = s.replace(/^[^,]+,\s*(.+)$/i, '$1').trim(); // “Brand, Organic Beans” → “Organic Beans”
+  // Normalize whitespace/punct
   s = s.replace(/[–—]/g, '-').replace(/\s+/g, ' ').replace(/\s*[-,:;]\s*/g, ' ');
   return s.trim();
 }
 
-/** Title Case but keep all-caps acronyms short and small words lower */
+/** Title Case but leave small connector words lower after the first token. */
 function tidyCase(s: string): string {
   const lower = (s || '').toLowerCase();
   const SMALL = new Set(['and', 'or', 'of', 'the', 'a', 'an', 'with', 'in']);
   return lower
     .split(' ')
-    .map((w, i) => {
-      if (i > 0 && SMALL.has(w)) return w;
-      return w.replace(/^\w/, (c) => c.toUpperCase());
-    })
+    .map((w, i) => (i > 0 && SMALL.has(w) ? w : w.replace(/^\w/, (c) => c.toUpperCase())))
     .join(' ')
     .trim();
 }
 
-/** Very small heuristic map for default qty/unit by item keywords */
+/** Heuristic default qty/unit based on common recipe conventions. */
 function guessQtyUnitFor(name: string): { qty: number; unit: string } {
   const n = name.toLowerCase();
 
-  // Canned goods
+  // Canned beans & similar (by can)
   if (/\b(beans?|chickpeas?|garbanzo|kidney|black beans?)\b/.test(n)) {
     return { qty: 1, unit: 'can' };
   }
 
-  // Pasta (dry ounces)
+  // Pasta (dry weight oz; most boxes are 16 oz)
   if (/\b(pasta|spaghetti|penne|farfalle|fusilli|rigatoni|macaroni|linguine|fettuccine|noodles?)\b/.test(n)) {
-    return { qty: 16, unit: 'oz' }; // common 1 lb box
+    return { qty: 16, unit: 'oz' };
   }
 
   // Rice (dry weight)
@@ -113,40 +115,45 @@ function guessQtyUnitFor(name: string): { qty: number; unit: string } {
     return { qty: 1, unit: 'lb' };
   }
 
-  // Meat/Chicken
+  // Meat/Chicken in pounds
   if (/\b(chicken|beef|pork|steak|breast|thighs?)\b/.test(n)) {
     return { qty: 1, unit: 'lb' };
   }
 
-  // Produce by count
-  if (/\b(garlic|onions?|avocados?|lemons?|limes?|eggs?)\b/.test(n)) {
+  // Produce typically by count
+  if (/\b(garlic|onions?|avocados?|lemons?|limes?)\b/.test(n)) {
     return { qty: 1, unit: 'unit' };
   }
 
-  // Tomatoes (if canned, earlier rule covers; fresh by count)
+  // Tomatoes: if not clearly canned from above, default by count
   if (/\btomatoes?\b/.test(n)) {
     return { qty: 1, unit: 'unit' };
   }
 
+  // Fallback
   return { qty: 1, unit: 'unit' };
 }
 
-/** Convert raw product text → Pantry row (brandless + tidy + smart qty/unit) */
-function toPantryRowNameQtyUnit(rawName: string): { name: string; qty: number; unit: string } {
-  const clean = tidyCase(brandlessName(rawName || ''));
+/** Convert raw product text → Pantry row (brandless + tidy + smart qty/unit). */
+function toPantryRow(rawName: string): { name: string; qty: number; unit: string } {
+  const base = brandlessName(rawName || '');
+  const clean = tidyCase(base);
   const { qty, unit } = guessQtyUnitFor(clean);
   return { name: clean, qty, unit };
 }
 
-type OCRResponse = { ok?: boolean; text?: string; error?: string };
+/* ------------------------------------------------------------------
+ * OCR flow
+ * -----------------------------------------------------------------*/
 
 /**
- * OCR: POST /api/ocr (field 'image') → { ok, text }
- * Returns pantry-ready detected items.
+ * Call your /api/ocr endpoint with a single image file (field name 'image').
+ * Your OCR route returns: { ok: boolean, text: string }.
+ * We split the merged text into candidate tokens so the user can confirm/edit.
  */
 export async function ocrDetectSingle(file: File): Promise<DetectedItem[]> {
   const fd = new FormData();
-  fd.append('image', file);
+  fd.append('image', file); // <-- matches your /api/ocr handler
 
   const res = await fetch('/api/ocr', { method: 'POST', body: fd });
   if (!res.ok) throw new Error(await res.text());
@@ -155,7 +162,7 @@ export async function ocrDetectSingle(file: File): Promise<DetectedItem[]> {
   const json: OCRResponse = (typeof j === 'object' && j !== null) ? (j as OCRResponse) : {};
 
   const text: string = json.text ?? '';
-
+  // Turn the big merged text into a small list of candidate item names
   const tokens = text
     .toLowerCase()
     .split(/\n|,|;|\/|•|·|\s{2,}/g)
@@ -167,7 +174,7 @@ export async function ocrDetectSingle(file: File): Promise<DetectedItem[]> {
   ).slice(0, 8);
 
   return candidates.map((t) => {
-    const row = toPantryRowNameQtyUnit(t);
+    const row = toPantryRow(t);
     return {
       name: row.name,
       qty: row.qty,
@@ -185,26 +192,27 @@ type UPCProduct = {
   name?: string;
   size?: string;
   category?: string;
+  // allow extra fields without using 'any'
   [k: string]: unknown;
 };
-
-type UPCReturn =
-  | { ok?: boolean; found?: boolean; product?: UPCProduct; item?: UPCProduct }
-  | UPCProduct;
 
 function pickUPCProduct(x: unknown): UPCProduct | null {
   if (!x || typeof x !== 'object') return null;
   const obj = x as Record<string, unknown>;
+  // Try nested product/item first
   if (obj.product && typeof obj.product === 'object') return obj.product as UPCProduct;
   if (obj.item && typeof obj.item === 'object') return obj.item as UPCProduct;
+  // Or treat the object itself as the product shape
   const maybe = obj as UPCProduct;
   if ('brand' in maybe || 'name' in maybe || 'size' in maybe || 'category' in maybe) return maybe;
   return null;
 }
 
 /**
- * UPC: POST /api/upc { code } → { ok, found, product }
- * Returns pantry-ready detected item.
+ * Call your /api/upc endpoint.
+ * It accepts POST { code: "<digits or term>" } and returns:
+ *   { ok, found, product }  (product has brand/name/size/category)
+ * We map that to a DetectedItem the pantry UI can use.
  */
 export async function upcLookup(codeOrTerm: string): Promise<DetectedItem> {
   const res = await fetch('/api/upc', {
@@ -214,18 +222,18 @@ export async function upcLookup(codeOrTerm: string): Promise<DetectedItem> {
   });
   if (!res.ok) throw new Error(await res.text());
 
-  const j: UPCReturn = await res.json();
+  const j: unknown = await res.json();
   const p = pickUPCProduct(j);
 
-  // Merge brand + name then strip brand for display
+  // Combine brand + name only to help recognition, then strip brand for display
   const merged = [p?.brand, p?.name].filter(Boolean).join(' ').trim() || `item ${codeOrTerm}`;
-  const row = toPantryRowNameQtyUnit(merged);
+  const row = toPantryRow(merged);
 
   return {
-    name: row.name,
-    qty: row.qty,
+    name: row.name,       // brandless, tidy
+    qty: row.qty,         // smart default (e.g., beans -> 1 can, pasta -> 16 oz)
     unit: row.unit,
     confidence: 0.99,
-    raw: p ?? j,
+    raw: p ?? j,          // keep original payload
   };
 }
