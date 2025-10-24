@@ -124,12 +124,28 @@ function inferQtyUnit(
 
   const hasPasta = /\bpasta\b/.test(txt) || PASTA_SHAPES_RE.test(txt);
 
-  // Pasta
+    // Pasta (prefer Net WT; ignore tiny "serving size" weights)
   if (hasPasta) {
-    if (mOz) return { qty: toNum(mOz), unit: 'oz' };
-    if (mG)  return { qty: toNum(mG),  unit: 'g' };
-    if (mLb) return { qty: Math.round(toNum(mLb) * 16), unit: 'oz' }; // 1 lb = 16 oz
-    return { qty: 1, unit: 'box' }; // dried pasta, no size found
+    const oz = mOz ? toNum(mOz) : NaN;
+    const g  = mG  ? toNum(mG)  : NaN;
+    const lb = mLb ? toNum(mLb) : NaN;
+
+    // If size is present but likely a "serving" (too small), fall back to a 16 oz box.
+    if (!Number.isNaN(oz)) {
+      if (oz >= 8) return { qty: oz, unit: 'oz' };     // real box size (e.g., 12–16 oz)
+      return { qty: 16, unit: 'oz' };                  // serving size like "2 oz" -> use 16 oz
+    }
+    if (!Number.isNaN(g)) {
+      if (g >= 200) return { qty: g, unit: 'g' };      // real box size in grams
+      return { qty: 454, unit: 'g' };                  // ~16 oz in grams
+    }
+    if (!Number.isNaN(lb)) {
+      if (lb >= 0.5) return { qty: Math.round(lb * 16), unit: 'oz' }; // 0.5 lb+ -> keep as oz
+      return { qty: 16, unit: 'oz' };
+    }
+
+    // No size found at all -> default to a typical US box weight.
+    return { qty: 16, unit: 'oz' };
   }
 
   // Beans (canned pantry)
