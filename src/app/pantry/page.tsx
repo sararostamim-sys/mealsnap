@@ -16,6 +16,22 @@ type PantryItem = {
   perish_by: string | null;
 };
 
+/** ------------------------------------------------------------------
+ * Common, readable units for pantry rows (single source of truth)
+ * Order: count-based, canned, weight (US), metric weight, volume.
+ * -----------------------------------------------------------------*/
+const UNIT_OPTIONS = [
+  'unit', // count / piece
+  'can',
+  'oz',
+  'lb',
+  'g',
+  'ml',
+  'cup',
+  'tbsp',
+  'tsp',
+] as const;
+
 export default function PantryPage() {
   useRequireAuth();
 
@@ -112,7 +128,7 @@ export default function PantryPage() {
           </nav>
         </div>
 
-        {/* MANUAL input row (your original UI, unchanged) */}
+        {/* MANUAL input row */}
         {tab === 'manual' && (
           <div className="flex flex-wrap gap-2 mb-4">
             <input
@@ -142,7 +158,7 @@ export default function PantryPage() {
               value={form.unit}
               onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))}
             >
-              {['unit', 'g', 'ml', 'cup', 'tbsp', 'tsp', 'can'].map((u) => (
+              {UNIT_OPTIONS.map((u) => (
                 <option key={u} value={u}>
                   {u}
                 </option>
