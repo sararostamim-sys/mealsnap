@@ -1,3 +1,4 @@
+// src/app/pantry/page.tsx
 'use client';
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
@@ -18,10 +19,9 @@ type PantryItem = {
 
 /** ------------------------------------------------------------------
  * Common, readable units for pantry rows (single source of truth)
- * Order: count-based, canned, weight (US), metric weight, volume.
  * -----------------------------------------------------------------*/
 const UNIT_OPTIONS = [
-  'unit', // count / piece
+  'unit',
   'can',
   'oz',
   'lb',
@@ -39,10 +39,20 @@ export default function PantryPage() {
   const [form, setForm] = useState({ name: '', qty: 1, unit: 'unit', perish_by: '' });
   const [loading, setLoading] = useState(true);
 
-  // NEW: tab state
+  // tabs
   const [tab, setTab] = useState<'manual' | 'upload' | 'barcode'>('manual');
 
-  /** Resolve current user id: prefer Supabase Auth, fall back to dev env */
+  // inline edit state
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<{ name: string; qty: number; unit: string; perish_by: string | '' }>({
+    name: '',
+    qty: 1,
+    unit: 'unit',
+    perish_by: '',
+  });
+  const isEditing = (id: string) => editingId === id;
+
+  /** Resolve current user id */
   async function resolveUserId(): Promise<string> {
     const { data: { user } } = await supabase.auth.getUser();
     return user?.id ?? getDevUserId();
@@ -54,7 +64,7 @@ export default function PantryPage() {
     const { data, error } = await supabase
       .from('pantry_items')
       .select('id,name,qty,unit,perish_by')
-      .eq('user_id', userId) // scope to the current user
+      .eq('user_id', userId)
       .order('created_at', { ascending: false });
 
     if (!error) setItems(data || []);
@@ -63,7 +73,6 @@ export default function PantryPage() {
 
   useEffect(() => {
     load();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function add() {
@@ -94,12 +103,59 @@ export default function PantryPage() {
       .from('pantry_items')
       .delete()
       .eq('id', id)
-      .eq('user_id', userId); // extra safety with user filter
+      .eq('user_id', userId);
     if (!error) {
       setItems((prev) => prev.filter((i) => i.id !== id));
+      if (editingId === id) setEditingId(null);
     } else {
       console.error(error);
       alert('Failed to delete item.');
+    }
+  }
+
+  function beginEdit(row: PantryItem) {
+    setEditingId(row.id);
+    setDraft({
+      name: row.name,
+      qty: row.qty,
+      unit: row.unit,
+      perish_by: row.perish_by ?? '',
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+  }
+
+  async function saveEdit(id: string) {
+    const userId = await resolveUserId();
+    const payload = {
+      name: draft.name.trim(),
+      qty: Number(draft.qty) || 1,
+      unit: draft.unit,
+      perish_by: draft.perish_by || null,
+    };
+    const { error } = await supabase
+      .from('pantry_items')
+      .update(payload)
+      .eq('id', id)
+      .eq('user_id', userId);
+
+    if (error) {
+      console.error(error);
+      alert('Failed to save changes.');
+      return;
+    }
+
+    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...payload } as PantryItem : i)));
+    setEditingId(null);
+  }
+
+  function onDraftKeyDown(e: React.KeyboardEvent) {
+    if (e.key === 'Enter') {
+      if (editingId) void saveEdit(editingId);
+    } else if (e.key === 'Escape') {
+      cancelEdit();
     }
   }
 
@@ -107,10 +163,8 @@ export default function PantryPage() {
     <div className="max-w-2xl">
       <h1 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100" data-build="pantry-tabs-v1">Pantry</h1>
 
-      {/* Card wrapper */}
       <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900 p-4 shadow-sm">
-
-        {/* Tabs header */}
+        {/* Tabs */}
         <div className="mb-4 border-b border-gray-200 dark:border-gray-800">
           <nav className="-mb-px flex gap-4">
             {(['manual','upload','barcode'] as const).map(t => (
@@ -128,7 +182,7 @@ export default function PantryPage() {
           </nav>
         </div>
 
-        {/* MANUAL input row */}
+        {/* MANUAL */}
         {tab === 'manual' && (
           <div className="flex flex-wrap gap-2 mb-4">
             <input
@@ -159,9 +213,7 @@ export default function PantryPage() {
               onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))}
             >
               {UNIT_OPTIONS.map((u) => (
-                <option key={u} value={u}>
-                  {u}
-                </option>
+                <option key={u} value={u}>{u}</option>
               ))}
             </select>
             <input
@@ -183,7 +235,7 @@ export default function PantryPage() {
           </div>
         )}
 
-        {/* UPLOAD PHOTOS tab */}
+        {/* UPLOAD */}
         {tab === 'upload' && (
           <UploadPhoto
             onConfirm={async (rows) => {
@@ -207,7 +259,7 @@ export default function PantryPage() {
           />
         )}
 
-        {/* SCAN BARCODE tab */}
+        {/* BARCODE */}
         {tab === 'barcode' && (
           <BarcodeCapture
             onCommit={async (item) => {
@@ -229,46 +281,140 @@ export default function PantryPage() {
           />
         )}
 
-        {/* Table */}
+        {/* TABLE (wrapped, fixed layout) */}
         {loading ? (
           <p className="text-gray-600 dark:text-gray-400">Loading…</p>
         ) : (
-          <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
-            <thead className="bg-gray-50 dark:bg-neutral-900">
-              <tr>
-                <th className="text-left p-2">Item</th>
-                <th className="text-left p-2">Qty</th>
-                <th className="text-left p-2">Unit</th>
-                <th className="text-left p-2">Perish by</th>
-                <th className="p-2" />
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((i) => (
-                <tr key={i.id} className="border-t border-gray-200 dark:border-gray-800">
-                  <td className="p-2">{i.name}</td>
-                  <td className="p-2">{i.qty}</td>
-                  <td className="p-2">{i.unit}</td>
-                  <td className="p-2">{i.perish_by ?? '-'}</td>
-                  <td className="p-2 text-right">
-                    <button
-                      onClick={() => remove(i.id)}
-                      className="text-red-600 dark:text-red-400 hover:underline"
-                    >
-                      Delete
-                    </button>
-                  </td>
-                </tr>
-              ))}
-              {items.length === 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full table-fixed text-sm border border-gray-200 dark:border-gray-800">
+              <thead className="bg-gray-50 dark:bg-neutral-900">
                 <tr>
-                  <td className="p-3 text-gray-500 dark:text-gray-400" colSpan={5}>
-                    No items yet.
-                  </td>
+                  <th className="text-left p-2 w-2/5">Item</th>
+                  <th className="text-left p-2 w-20">Qty</th>
+                  <th className="text-left p-2 w-24">Unit</th>
+                  <th className="text-left p-2 w-44">Perish by</th>
+                  <th className="p-2 w-40 text-right">Actions</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {items.map((i) => {
+                  const editing = isEditing(i.id);
+                  return (
+                    <tr key={i.id} className="border-t border-gray-200 dark:border-gray-800 align-top">
+                      <td className="p-2">
+                        {editing ? (
+                          <input
+                            className="border rounded px-2 py-1 w-full"
+                            value={draft.name}
+                            onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                            onKeyDown={onDraftKeyDown}
+                            autoFocus
+                          />
+                        ) : (
+                          <div className="truncate">{i.name}</div>
+                        )}
+                      </td>
+                      <td className="p-2">
+                        {editing ? (
+                          <input
+                            type="number"
+                            className="border rounded px-2 py-1 w-full"
+                            value={draft.qty}
+                            onChange={(e) => setDraft((d) => ({ ...d, qty: Number(e.target.value) }))}
+                            onKeyDown={onDraftKeyDown}
+                          />
+                        ) : (
+                          i.qty
+                        )}
+                      </td>
+                      <td className="p-2">
+                        {editing ? (
+                          <select
+                            className="border rounded px-2 py-1 w-full"
+                            value={draft.unit}
+                            onChange={(e) => setDraft((d) => ({ ...d, unit: e.target.value }))}
+                            onKeyDown={onDraftKeyDown}
+                          >
+                            {UNIT_OPTIONS.map(u => (
+                              <option key={u} value={u}>{u}</option>
+                            ))}
+                          </select>
+                        ) : (
+                          i.unit
+                        )}
+                      </td>
+                      <td className="p-2">
+                        {editing ? (
+                          <input
+                            type="date"
+                            className="border rounded px-2 py-1 w-full"
+                            value={draft.perish_by}
+                            onChange={(e) => setDraft((d) => ({ ...d, perish_by: e.target.value }))}
+                            onKeyDown={onDraftKeyDown}
+                          />
+                        ) : (
+                          i.perish_by ?? '-'
+                        )}
+                      </td>
+                      <td className="p-2">
+                        <div className="flex justify-end items-center gap-3 whitespace-nowrap">
+                          {editing ? (
+                            <>
+                              <button
+                                onClick={() => saveEdit(i.id)}
+                                className="text-green-700 dark:text-green-400 hover:underline"
+                                aria-label="Save changes"
+                              >
+                                Save
+                              </button>
+                              <button
+                                onClick={cancelEdit}
+                                className="text-gray-600 dark:text-gray-400 hover:underline"
+                                aria-label="Cancel editing"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => remove(i.id)}
+                                className="text-red-600 dark:text-red-400 hover:underline"
+                                aria-label="Delete item"
+                              >
+                                Delete
+                              </button>
+                            </>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => beginEdit(i)}
+                                className="text-blue-700 dark:text-blue-400 hover:underline"
+                                aria-label="Edit item"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => remove(i.id)}
+                                className="text-red-600 dark:text-red-400 hover:underline"
+                                aria-label="Delete item"
+                              >
+                                Delete
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {items.length === 0 && (
+                  <tr>
+                    <td className="p-3 text-gray-500 dark:text-gray-400" colSpan={5}>
+                      No items yet.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>
@@ -290,8 +436,7 @@ function UploadPhoto({ onConfirm }: { onConfirm: (rows: { name: string; qty: num
       if (!f) return;
       setPending(true);
       try {
-        const items = await ocrDetectSingle(f); // uses /api/ocr (field 'image')
-        // de-dupe by name; cap shown list
+        const items = await ocrDetectSingle(f); // /api/ocr
         const dedup = Array.from(new Map(items.map(i => [i.name, i])).values()).slice(0, 10);
         setRows(dedup);
       } catch (e) {
@@ -374,7 +519,7 @@ function BarcodeCapture({ onCommit }: { onCommit: (item: { name: string; qty?: n
           if (pending) return;
           setPending(true);
           try {
-            const item = await upcLookup(code); // uses /api/upc (POST)
+            const item = await upcLookup(code);
             setLast(item);
           } catch (e) {
             console.error(e);
