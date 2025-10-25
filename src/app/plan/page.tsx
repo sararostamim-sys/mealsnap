@@ -1,3 +1,4 @@
+// src/app/plan/page.tsx
 'use client';
 
 import { useEffect, useMemo, useState, useCallback } from 'react';
@@ -114,8 +115,8 @@ export default function PlanPage() {
       const prefsRow: Prefs = pr ? {
         diet: pr.diet ?? 'none',
         allergies: pr.allergies ?? [],
-        dislikes: pr.disliked_ingredients ?? [],        // map from DB column
-        max_prep_minutes: pr.max_prep_time ?? 45,       // map from DB column
+        dislikes: pr.disliked_ingredients ?? [],
+        max_prep_minutes: pr.max_prep_time ?? 45,
         budget_level: pr.budget_level ?? 'medium',
         updated_at: pr.updated_at ?? undefined
       } : {
@@ -163,7 +164,6 @@ export default function PlanPage() {
   const generateAndSave = useCallback(async () => {
     if (!prefs || !userId) return;
 
-    // Build indexes for scoring
     const allergy = new Set((prefs.allergies || []).map(a => a.toLowerCase()));
     const dislike = new Set((prefs.dislikes || []).map(d => d.toLowerCase()));
     const pantrySet = new Set(pantry.map(p => p.name));
@@ -195,7 +195,7 @@ export default function PlanPage() {
 
     const chosen = scored.slice(0, 7).map(x => x.r);
 
-    // 1) create plan header (scoped to current user)
+    // 1) create plan header
     const { data: planRow, error: planErr } = await supabase
       .from('user_meal_plan')
       .insert({ user_id: userId })
@@ -230,17 +230,20 @@ export default function PlanPage() {
     URL.revokeObjectURL(url);
   }
 
-  if (loading) return <p>Loading…</p>;
+  if (loading) return <p className="max-w-3xl mx-auto">Loading…</p>;
 
   const openRecipe = meals.find(m => m.id === openId) || null;
   const openIngs = openId ? (ingByRecipe.get(openId) || []) : [];
   const generatedLabel = planMeta ? new Date(planMeta.generated_at).toLocaleString() : null;
 
   return (
-    <div className="max-w-3xl">
-      <div className="flex items-start justify-between">
+    <div className="max-w-3xl mx-auto">
+      {/* Header OUTSIDE card (matches Pantry/Preferences) */}
+      <div className="flex items-start justify-between mb-4">
         <div>
-          <h1 className="text-2xl font-semibold mb-1">Your 7-Day Plan</h1>
+          <h1 className="text-2xl font-semibold mb-1 text-gray-900 dark:text-gray-100">
+            Your 7-Day Plan
+          </h1>
           {generatedLabel && !stale && (
             <p className="text-sm text-gray-600 dark:text-gray-400">Generated on {generatedLabel}</p>
           )}
@@ -253,20 +256,18 @@ export default function PlanPage() {
           )}
         </div>
 
-        {/* Primary button (dark-mode friendly) */}
         <button
           onClick={generateAndSave}
-          className="rounded px-4 py-2
-                     bg-black text-white hover:opacity-90
-                     dark:bg-white dark:text-black"
+          className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
         >
           {meals.length ? 'Regenerate plan' : 'Generate plan'}
         </button>
       </div>
 
+      {/* Content card starts ABOVE Meals */}
       {meals.length > 0 && (
-        <>
-          <h2 className="text-xl font-semibold mt-6 mb-2">Meals</h2>
+        <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900 p-4 shadow-sm">
+          <h2 className="text-xl font-semibold mb-2 text-gray-900 dark:text-gray-100">Meals</h2>
           <div className="grid md:grid-cols-2 gap-4">
             {meals.map(m => (
               <div
@@ -294,41 +295,40 @@ export default function PlanPage() {
             ))}
           </div>
 
-          <h2 className="text-xl font-semibold mt-6 mb-2">Shopping List</h2>
-          <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
-            <thead className="bg-gray-50 dark:bg-neutral-900">
-              <tr>
-                <th className="text-left p-2">Item</th>
-                <th className="text-left p-2">Qty</th>
-                <th className="text-left p-2">Unit</th>
-              </tr>
-            </thead>
-            <tbody>
-              {shopping.map((s, idx) => (
-                <tr key={idx} className="border-t border-gray-200 dark:border-gray-800">
-                  <td className="p-2">{s.name}</td>
-                  <td className="p-2">{s.qty}</td>
-                  <td className="p-2">{s.unit}</td>
+          <h2 className="text-xl font-semibold mt-6 mb-2 text-gray-900 dark:text-gray-100">Shopping List</h2>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
+              <thead className="bg-gray-50 dark:bg-neutral-900">
+                <tr>
+                  <th className="text-left p-2">Item</th>
+                  <th className="text-left p-2">Qty</th>
+                  <th className="text-left p-2">Unit</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {shopping.map((s, idx) => (
+                  <tr key={idx} className="border-t border-gray-200 dark:border-gray-800">
+                    <td className="p-2">{s.name}</td>
+                    <td className="p-2">{s.qty}</td>
+                    <td className="p-2">{s.unit}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
 
-          {/* Download CSV matches primary button style, bottom-left */}
           <div className="mt-3">
             <button
               onClick={downloadCSV}
-              className="rounded px-4 py-2
-                         bg-black text-white hover:opacity-90
-                         dark:bg-white dark:text-black"
+              className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
             >
               Download CSV
             </button>
           </div>
-        </>
+        </div>
       )}
 
-      {/* Modal */}
+      {/* Modal (unchanged) */}
       <Modal open={!!openId} onClose={() => setOpenId(null)}>
         {openRecipe ? (
           <div>

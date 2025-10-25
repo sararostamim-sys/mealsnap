@@ -1,3 +1,4 @@
+// src/app/preferences/page.tsx
 'use client';
 import { useEffect, useState } from 'react';
 import { supabase } from '@/lib/supabase';
@@ -49,7 +50,7 @@ export default function PreferencesPage() {
           user_id: data.user_id,
           diet: data.diet ?? 'none',
           allergies: data.allergies ?? [],
-          dislikes: data.disliked_ingredients ?? [], // map from DB
+          dislikes: data.disliked_ingredients ?? [],
           max_prep_minutes: data.max_prep_time ?? 45,
           budget_level: data.budget_level ?? 'medium',
         });
@@ -74,7 +75,7 @@ export default function PreferencesPage() {
       user_id: userId,
       diet: prefs.diet,
       allergies: prefs.allergies,
-      disliked_ingredients: prefs.dislikes, // map back to DB column
+      disliked_ingredients: prefs.dislikes,
       max_prep_time: prefs.max_prep_minutes,
       budget_level: prefs.budget_level,
     };
@@ -84,32 +85,25 @@ export default function PreferencesPage() {
     else console.error(error);
   }
 
-  if (loading) return <p>Loading…</p>;
+  if (loading) return <p className="max-w-2xl mx-auto">Loading…</p>;
 
-  // style helpers
+  // shared styles (kept consistent with Pantry)
   const chipBase = 'px-3 py-1.5 rounded-md border text-sm transition';
   const chipOff =
-    'border-gray-300 dark:border-gray-700 ' +
-    'bg-white dark:bg-neutral-900 ' +
-    'text-gray-700 dark:text-gray-300';
+    'border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-900 text-gray-700 dark:text-gray-300';
   const chipOn =
-    'border-gray-800 dark:border-gray-200 ' +
-    'bg-gray-100 dark:bg-neutral-800 ' +
-    'text-gray-900 dark:text-gray-100';
-
+    'border-gray-800 dark:border-gray-200 bg-gray-100 dark:bg-neutral-800 text-gray-900 dark:text-gray-100';
   const inputCls =
-    'rounded border px-3 py-2 ' +
-    'border-gray-300 dark:border-gray-700 ' +
-    'bg-white dark:bg-neutral-900 ' +
-    'text-gray-900 dark:text-gray-100 ' +
-    'placeholder:text-gray-400 dark:placeholder:text-gray-500';
-
+    'rounded border px-3 py-2 border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500';
   const selectCls = inputCls + ' pr-8';
 
   return (
-    <div className="max-w-2xl">
-      <h1 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100">Preferences</h1>
+    <div className="max-w-2xl mx-auto">
+      <h1 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100">
+        Preferences
+      </h1>
 
+      {/* Card (same look & sizing philosophy as Pantry) */}
       <section className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900 p-4 shadow-sm">
         {/* Diet */}
         <div className="mb-5">
@@ -166,7 +160,7 @@ export default function PreferencesPage() {
         </div>
 
         {/* Numbers/select row */}
-        <div className="mb-6 flex flex-wrap gap-6">
+        <div className="mb-4 flex flex-wrap gap-6">
           <div>
             <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">Max prep minutes</label>
             <input
@@ -196,8 +190,7 @@ export default function PreferencesPage() {
         <div className="flex items-center gap-3">
           <button
             onClick={save}
-            className="rounded px-4 py-2 bg-black text-white hover:opacity-90
-                       dark:bg-white dark:text-black"
+            className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
           >
             Save
           </button>

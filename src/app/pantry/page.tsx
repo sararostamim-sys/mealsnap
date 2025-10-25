@@ -5,7 +5,6 @@ import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import { getDevUserId } from '@/lib/user';
 
-// NEW: helpers + scanner
 import BarcodeScanner from '@/components/BarcodeScanner';
 import { ocrDetectSingle, upcLookup, type DetectedItem } from '@/lib/helpers';
 
@@ -17,9 +16,7 @@ type PantryItem = {
   perish_by: string | null;
 };
 
-/** ------------------------------------------------------------------
- * Common, readable units for pantry rows (single source of truth)
- * -----------------------------------------------------------------*/
+/** Common, readable units for pantry rows (single source of truth) */
 const UNIT_OPTIONS = [
   'unit',
   'can',
@@ -160,7 +157,7 @@ export default function PantryPage() {
   }
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-3xl md:max-w-4xl mx-auto">
       <h1 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100" data-build="pantry-tabs-v1">Pantry</h1>
 
       <div className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900 p-4 shadow-sm">
@@ -281,26 +278,36 @@ export default function PantryPage() {
           />
         )}
 
-        {/* TABLE (wrapped, fixed layout) */}
+        {/* TABLE (using colgroup to rebalance widths) */}
         {loading ? (
           <p className="text-gray-600 dark:text-gray-400">Loading…</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full table-fixed text-sm border border-gray-200 dark:border-gray-800">
+            <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
+              <colgroup>
+                <col className="w-[56%]" /> {/* Item (wider) */}
+                <col className="w-[10%]" /> {/* Qty */}
+                <col className="w-[10%]" /> {/* Unit */}
+                <col className="w-[16%]" /> {/* Perish by (more room) */}
+                <col className="w-[8%]"  /> {/* Actions */}
+              </colgroup>
+
               <thead className="bg-gray-50 dark:bg-neutral-900">
                 <tr>
-                  <th className="text-left p-2 w-2/5">Item</th>
-                  <th className="text-left p-2 w-20">Qty</th>
-                  <th className="text-left p-2 w-24">Unit</th>
-                  <th className="text-left p-2 w-44">Perish by</th>
-                  <th className="p-2 w-40 text-right">Actions</th>
+                  <th className="text-left p-2">Item</th>
+                  <th className="text-left p-2">Qty</th>
+                  <th className="text-left p-2">Unit</th>
+                  <th className="text-left p-2">Perish by</th>
+                  <th className="p-2 text-right">Actions</th>
                 </tr>
               </thead>
+
               <tbody>
                 {items.map((i) => {
                   const editing = isEditing(i.id);
                   return (
                     <tr key={i.id} className="border-t border-gray-200 dark:border-gray-800 align-top">
+                      {/* Item */}
                       <td className="p-2">
                         {editing ? (
                           <input
@@ -314,11 +321,13 @@ export default function PantryPage() {
                           <div className="truncate">{i.name}</div>
                         )}
                       </td>
+
+                      {/* Qty */}
                       <td className="p-2">
                         {editing ? (
                           <input
                             type="number"
-                            className="border rounded px-2 py-1 w-full"
+                            className="border rounded px-2 py-1 w-20"
                             value={draft.qty}
                             onChange={(e) => setDraft((d) => ({ ...d, qty: Number(e.target.value) }))}
                             onKeyDown={onDraftKeyDown}
@@ -327,10 +336,12 @@ export default function PantryPage() {
                           i.qty
                         )}
                       </td>
+
+                      {/* Unit */}
                       <td className="p-2">
                         {editing ? (
                           <select
-                            className="border rounded px-2 py-1 w-full"
+                            className="border rounded px-2 py-1 w-24"
                             value={draft.unit}
                             onChange={(e) => setDraft((d) => ({ ...d, unit: e.target.value }))}
                             onKeyDown={onDraftKeyDown}
@@ -343,19 +354,23 @@ export default function PantryPage() {
                           i.unit
                         )}
                       </td>
+
+                      {/* Perish by */}
                       <td className="p-2">
                         {editing ? (
                           <input
                             type="date"
-                            className="border rounded px-2 py-1 w-full"
+                            className="border rounded px-2 py-1 w-44"
                             value={draft.perish_by}
                             onChange={(e) => setDraft((d) => ({ ...d, perish_by: e.target.value }))}
                             onKeyDown={onDraftKeyDown}
                           />
                         ) : (
-                          i.perish_by ?? '-'
+                          <span className="whitespace-nowrap">{i.perish_by ?? '-'}</span>
                         )}
                       </td>
+
+                      {/* Actions */}
                       <td className="p-2">
                         <div className="flex justify-end items-center gap-3 whitespace-nowrap">
                           {editing ? (
@@ -405,6 +420,7 @@ export default function PantryPage() {
                     </tr>
                   );
                 })}
+
                 {items.length === 0 && (
                   <tr>
                     <td className="p-3 text-gray-500 dark:text-gray-400" colSpan={5}>
