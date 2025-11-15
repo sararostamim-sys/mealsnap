@@ -1,5 +1,5 @@
 // src/lib/helpers.ts
-
+import { postClean } from './normalize';
 /** ------------------------------------------------------------------
  * Mobile UA detection (keeps your existing behavior, no ts-ignore)
  * -----------------------------------------------------------------*/
@@ -98,7 +98,7 @@ function tidyCase(s: string): string {
 
 /* ---------- Pasta shapes detector (for default "box") ---------- */
 const PASTA_SHAPES_RE =
-  /\b(radiatori|rigatoni|penne|fusilli|farfalle|orecchiette|spaghetti|linguine|fettuccine|rotini|shells?|elbows?|macaroni|ziti|bucatini|cavatappi|gemelli|ditalini|campanelle|conchiglie|pappardelle|tagliatelle)\b/i;
+  /\b(radiatori|rigatoni|penne|fusilli|farfalle|farfalline|orecchiette|spaghetti|linguine|fettuccine|rotini|shells?|elbows?|macaroni|ziti|bucatini|cavatappi|gemelli|ditalini|campanelle|conchiglie|pappardelle|tagliatelle)\b/i;
 
 /**
  * Decide the best (qty, unit) from detected text (name + optional size/category).
@@ -258,6 +258,33 @@ function pickUPCProduct(x: unknown): UPCProduct | null {
   return null;
 }
 
+// Infer a sensible qty + unit for barcode-only items based on the product name.
+function inferFromBarcodeName(raw: string): { unit: string; qty: number } {
+  const n = postClean(raw).toLowerCase();
+
+  // Pasta / noodles / boxed shapes
+  if (/\b(pasta|spaghetti|penne|rigatoni|rigate|farfalle|farfalline|fusilli|noodles?)\b/.test(n)) {
+    // Typical pantry pasta bag/box
+    return { unit: 'oz', qty: 16 };
+  }
+
+  // Canned beans / veg / soup
+  if (
+    /\b(beans?|chickpeas?|garbanzos?|corn|peas|soup|broth|tomato(es)?|tuna|salmon)\b/.test(n) &&
+    (/\b(can|canned)\b/.test(n) || /\btrader joe'?s\b/.test(n))
+  ) {
+    return { unit: 'can', qty: 1 };
+  }
+
+  // Rice / grains
+  if (/\b(rice|quinoa|bulgur|couscous)\b/.test(n)) {
+    return { unit: 'oz', qty: 16 };
+  }
+
+  // Fallback – keep old behavior
+  return { unit: 'unit', qty: 1 };
+}
+
 /**
  * Call your /api/upc endpoint.
  * It accepts POST { code: "<digits or term>" } and returns:
@@ -276,14 +303,32 @@ export async function upcLookup(codeOrTerm: string): Promise<DetectedItem> {
   const p = pickUPCProduct(j);
 
   // Combine brand + name only to help recognition, then strip brand for display
-  const merged = [p?.brand, p?.name].filter(Boolean).join(' ').trim() || `item ${codeOrTerm}`;
-  const row = toPantryRow(merged, p?.size as string | undefined, p?.category as string | undefined);
+  const merged =
+    [p?.brand, p?.name].filter(Boolean).join(' ').trim() ||
+    `item ${codeOrTerm}`;
+
+  const row = toPantryRow(
+    merged,
+    p?.size as string | undefined,
+    p?.category as string | undefined
+  );
+
+  // Start from the row your existing logic produced
+   const { name } = row;
+   let { qty, unit } = row;
+
+  // If we ended up with the generic "1 unit", try to infer something smarter
+  if ((!qty || qty === 1) && (!unit || unit === 'unit')) {
+    const inferred = inferFromBarcodeName(merged);
+    qty = inferred.qty;
+    unit = inferred.unit;
+  }
 
   return {
-    name: row.name,       // brandless, tidy
-    qty: row.qty,         // smart default (e.g., beans -> can, pasta -> box or oz)
-    unit: row.unit,
+    name,          // brandless, tidy
+    qty,           // smart default (e.g. pasta → 16 oz, beans → 1 can)
+    unit,
     confidence: 0.99,
-    raw: p ?? j,          // keep original payload
+    raw: p ?? j,   // keep original payload for debugging if needed
   };
 }

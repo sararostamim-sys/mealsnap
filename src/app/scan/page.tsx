@@ -12,6 +12,7 @@ import {
   stripBrandFromName,
   extractTypeByCategory,
   detectCategory,
+  postClean,
 } from '@/lib/normalize';
 import { draftProductFromOcrSmart } from '@/lib/normalize_smart';
 import { matchCanonical } from '@/lib/match';
@@ -20,9 +21,56 @@ import products from '@/data/products.json';
 const BarcodeScanner = dynamic(() => import('@/components/BarcodeScanner'), { ssr: false });
 import { decodeBarcodeFromFile } from '@/components/BarcodeScanner';
 
+// === Small helpers for barcode behavior ===========================
+
+// For BARCODE scans only: choose a sensible default unit + qty
+function inferFromBarcodeName(raw: string): { unit: string; qty: number } {
+  const n = postClean(raw).toLowerCase();
+
+  // Pasta / noodles / typical boxed shape
+  if (/\b(pasta|spaghetti|penne|rigatoni|rigate|farfalle|farfalline|fusilli|noodles?)\b/.test(n)) {
+    // Default to a typical 16 oz bag/box
+    return { unit: 'oz', qty: 16 };
+  }
+
+  // Canned beans / veg / soups (things you usually add as "1 can")
+  if (
+    /\b(beans?|chickpeas?|garbanzos?|corn|peas|soup|broth|tomato(es)?|tuna|salmon)\b/.test(n) &&
+    (/\b(can|canned)\b/.test(n) || /\btrader joe'?s\b/.test(n))
+  ) {
+    return { unit: 'can', qty: 1 };
+  }
+
+  // Rice / grains
+  if (/\b(rice|quinoa|bulgur|couscous)\b/.test(n)) {
+    return { unit: 'oz', qty: 16 };
+  }
+
+  // Fallback: let the UI behave as before
+  return { unit: 'unit', qty: 1 };
+}
+
+// Normalize names so we can merge duplicates like
+// "Organic Kidney Beans" & "Trader Joe's Kidney Beans"
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function normKeyName(s: string): string {
+  return postClean(s)
+    .toLowerCase()
+    .replace(/\b(trader joe'?s|kirkland|organic)\b/g, '') // strip brand / organic
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 type Canonical = { id: string; brand: string; name: string; category?: string; score?: number };
 type ProductSeed = { id: string; brand: string; name: string; category?: string };
-type Draft = { brand: string; name: string; size: string; candidates: string[] };
+type Draft = {
+  brand: string;
+  name: string;
+  size: string;
+  candidates: string[];
+  unit?: string;       // for pantry merging + sensible defaults
+  quantity?: number;   // default quantity (e.g., 1 can, 16 oz box)
+};
 type ResultT = {
   source: 'upc' | 'ocr';
   text: string;
@@ -48,7 +96,7 @@ const useClassifier = () =>
 
     // Pantry families
     if (/\bbeans?\b|kidney|black|garbanzo|chickpeas?|pinto|cannellini|lentils?\b/.test(txt)) out.add('Beans');
-    if (/\bpasta|spaghetti|penne|farfalle|fusilli|rigatoni|rotini|macaroni|radiatori|orecchiette|linguine|fettuccine|noodles?\b/.test(txt)) out.add('Pasta');
+    if (/\bpasta|spaghetti|penne|farfalle|farfalline|fusilli|rigatoni|rotini|macaroni|radiatori|orecchiette|linguine|fettuccine|noodles?\b/.test(txt)) out.add('Pasta');
     if (/\brice\b|basmati|jasmine|arborio|sushi\b/.test(txt)) out.add('Rice');
     if (/\btomato(?:es)?\b|paste|sauce|crushed|diced\b/.test(txt)) out.add('Tomatoes');
     if (/\bbroth\b|\bstock\b/.test(txt)) out.add('Broth');
@@ -345,63 +393,92 @@ export default function ScanPage() {
   }
 
   async function handleBarcode(upc: string) {
-    setBusy(true);
-    setError('');
-    setHint(`Barcode ${upc} found. Looking up product…`);
-    try {
-      const prod = await lookupUPC(upc);
-      if (prod) {
-        // 1) Remove brand from provider name and proper-case it
-        const rawBrand = (prod.brand || '').trim();
-        const rawName = (prod.name || '').trim();
-        const nameNoBrand = properCaseName(stripBrandFromName(rawName, rawBrand) || rawName);
+  setBusy(true);
+  setError('');
+  setHint(`Barcode ${upc} found. Looking up product…`);
 
-        // 2) Build labels from *brandless* name so classification is accurate
-        let labels = classifyFromText(`${nameNoBrand} ${rawBrand}`.trim());
-        // Prefer subtype over family
-        labels = labelsWithPreferredSubtype(labels, `${nameNoBrand} ${rawBrand}`.trim());
+  try {
+    const prod = await lookupUPC(upc);
 
-        // 3) Sanitize the UPC size (hide serving sizes for pantry items)
-        const sizeClean = sanitizeUPCSize(nameNoBrand, prod.size, labels);
+    if (prod) {
+      // 1) Clean brand + name from provider
+      const rawBrand = (prod.brand || '').trim();
+      const rawName  = (prod.name  || '').trim();
 
-        const draftBase: Draft = {
-          brand: rawBrand,
-          name: nameNoBrand,
-          size: sizeClean,
-          candidates: [rawBrand, nameNoBrand].filter(Boolean),
-        };
+      // Strip brand from name (so "Trader Joe's Organic Kidney Beans" -> "Organic Kidney Beans")
+      const nameNoBrand = properCaseName(
+        stripBrandFromName(rawName, rawBrand) || rawName
+      );
 
-        // For the “OCR Text” box, show our normalized summary (helps debugging)
-        const text = [rawBrand, nameNoBrand, sizeClean].filter(Boolean).join(' ').trim();
+      // 2) Build labels from a brandless-focused string
+      const classifierInput = `${nameNoBrand} ${rawBrand}`.trim();
 
-        const allergens: string[] = [];
+      let labels = classifyFromText(classifierInput);
+      labels = labelsWithPreferredSubtype(labels, classifierInput);
 
-        const matches = matchCanonical(
-          { ...draftBase, labels },
-          catalog,
-          { topK: 5 }
-        ) as Canonical[];
+      // 3) Sanitize the UPC size (hide serving sizes / weird formats for pantry use)
+      const sizeClean = sanitizeUPCSize(nameNoBrand, prod.size, labels);
 
-        // Brand backfill from catalog (permissive)
-        let brandFinal = draftBase.brand;
-        if (!brandFinal && matches.length) {
-          const top = matches[0];
-          if ((top.score ?? 0) >= 0.12 && top.brand) brandFinal = top.brand;
+      // 4) Infer sensible unit + qty for BARCODE flows
+      const { unit, qty } = inferFromBarcodeName(classifierInput);
+
+      const draftBase: Draft = {
+        brand: rawBrand,
+        name:  nameNoBrand,
+        size:  sizeClean,
+        candidates: [rawBrand, nameNoBrand].filter(Boolean),
+        unit,
+        quantity: qty,
+      };
+
+      // For the “OCR Text” box / debug area, show our normalized summary
+      const text = [rawBrand, nameNoBrand, sizeClean]
+        .filter(Boolean)
+        .join(' ')
+        .trim();
+
+      const allergens: string[] = [];
+
+      const matches = matchCanonical(
+        { ...draftBase, labels },
+        catalog,
+        { topK: 5 }
+      ) as Canonical[];
+
+      // 5) Brand backfill from catalog (permissive)
+      let brandFinal = draftBase.brand;
+      if (!brandFinal && matches.length) {
+        const top = matches[0];
+        if ((top.score ?? 0) >= 0.12 && top.brand) {
+          brandFinal = top.brand;
         }
-        const draft: Draft = { ...draftBase, brand: brandFinal };
-
-        setResult({ source: 'upc', text, draft, labels, allergens, matches, previewUrl: null });
-        setHint('Found by barcode. (Add a front photo if you want nutrition & allergens.)');
-      } else {
-        setHint('Barcode not in database. Capture the FRONT label instead.');
       }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Barcode lookup failed.';
-      setError(msg);
-    } finally {
-      setBusy(false);
+
+      const draft: Draft = { ...draftBase, brand: brandFinal };
+
+      setResult({
+        source: 'upc',
+        text,
+        draft,
+        labels,
+        allergens,
+        matches,
+        previewUrl: null,
+      });
+
+      setHint(
+        'Found by barcode. (Add a front photo if you want nutrition & allergens.)'
+      );
+    } else {
+      setHint('Barcode not in database. Capture the FRONT label instead.');
     }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'Barcode lookup failed.';
+    setError(msg);
+  } finally {
+    setBusy(false);
   }
+}
 
   async function handleBarcodeFile(file: File) {
     setBusy(true);
@@ -533,10 +610,16 @@ export default function ScanPage() {
           <h3 className="font-medium mb-2">Scan Barcode</h3>
 
           {!mounted ? (
-            <div className="w/full h-40 rounded border bg-black/5" />
+            <div /> // (or a tiny skeleton if you want)
           ) : canUseCamera ? (
             camState === 'running' ? (
-              <BarcodeScanner onDetected={handleBarcode} onError={setError} />
+              <BarcodeScanner
+               onDetected={handleBarcode}
+               onError={setError}
+               maxWidth={360}    // tighter video width
+               boxFrac={0.56}    // smaller inner aim box
+               //showTorch        
+               />
             ) : (
               <div className="space-y-2">
                 <button onClick={startScanner} className="px-3 py-2 rounded-xl border text-sm">

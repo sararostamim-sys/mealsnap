@@ -8,7 +8,7 @@ export const BRAND_HINTS = [
 ];
 
 export const PASTA_TYPES = [
-  'fusilli','penne','spaghetti','farfalle','rigatoni','rotini','macaroni',
+  'fusilli','penne','spaghetti','farfalle','farfalline','rigatoni','rotini','macaroni',
   'linguine','fettuccine','orecchiette','shells','elbows','capellini','vermicelli',
   'bucatini','ziti','ditalini','campanelle','cavatappi','gemelli','paccheri','radiatori'
 ];
@@ -34,7 +34,7 @@ const FISH_TYPES = ['tuna','salmon','sardines','anchovies','mackerel'];
 
 const CATEGORY_KEYWORDS: Record<string, RegExp[]> = {
   Pasta: [
-    /\bpasta\b/i, /\b(fusilli|penne|spaghetti|farfalle|rigatoni|rotini|linguine|fettuccine|macaroni|orecchiette|capellini|vermicelli|shells|elbows)\b/i
+    /\bpasta\b/i, /\b(fusilli|penne|spaghetti|farfalle|farfalline|rigatoni|rotini|linguine|fettuccine|macaroni|orecchiette|capellini|vermicelli|shells|elbows)\b/i
   ],
   Beans: [
     /\bbeans?\b/i, /\bkidney\b/i, /\bblack\b/i, /\bgarbanzo|chickpeas?\b/i, /\bpinto\b/i, /\bcannellini\b/i, /\blentils?\b/i, /\brefried\b/i
@@ -556,6 +556,14 @@ export function scanAllergens(text: string): string[] {
   const AL = ['gluten','wheat','egg','soy','milk','tree nuts','peanut','sesame'];
   AL.forEach(a => { if (t.includes(a)) hits.push(capitalizeWords(a)); });
   return Array.from(new Set(hits));
+}
+
+// ---------- Lightweight post-cleaner for names ----------
+
+export function postClean(text: string): string {
+  if (!text) return '';
+  const cleaned = cleanOcrText(text);
+  return properCaseName(cleaned);
 }
 
 // ---------- utils ----------

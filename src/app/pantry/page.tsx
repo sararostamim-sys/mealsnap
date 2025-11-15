@@ -1,12 +1,23 @@
 // src/app/pantry/page.tsx
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import { getDevUserId } from '@/lib/user';
 
 import BarcodeScanner from '@/components/BarcodeScanner';
 import { ocrDetectSingle, upcLookup, type DetectedItem } from '@/lib/helpers';
+
+// Normalize a pantry item name for duplicate detection
+function normalizeNameForKey(name: string): string {
+  return (name || '')
+    .toLowerCase()
+    // Strip common brand / marketing noise that differs across sources
+    .replace(/\b(trader joe'?s|kirkland|costco|o organics|organic)\b/g, '')
+    // Collapse non-alphanumerics to spaces
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
 
 type PantryItem = {
   id: string;
@@ -55,43 +66,99 @@ export default function PantryPage() {
     return user?.id ?? getDevUserId();
   }
 
-  async function load() {
-    setLoading(true);
-    const userId = await resolveUserId();
-    const { data, error } = await supabase
-      .from('pantry_items')
-      .select('id,name,qty,unit,perish_by')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
+  const load = useCallback(async () => {
+  setLoading(true);
+  const userId = await resolveUserId();
+  const { data, error } = await supabase
+    .from('pantry_items')
+    .select('id,name,qty,unit,perish_by')
+    .eq('user_id', userId)
+    .order('created_at', { ascending: false });
 
-    if (!error) setItems(data || []);
-    setLoading(false);
+  if (!error) setItems(data || []);
+  setLoading(false);
+}, []);
+
+    // We only need to load once on mount; `load` captures everything it needs.
+    useEffect(() => {
+  void load();
+}, [load]);
+
+    // Add-or-merge helper: if a matching row exists (same normalized name + unit),
+  // increment qty; otherwise insert a new row.
+  async function upsertPantryItem(input: {
+    name: string;
+    qty?: number;
+    unit?: string;
+    perish_by?: string | null;
+  }) {
+    const userId = await resolveUserId();
+    const nameTrim = input.name.trim();
+    if (!nameTrim) return;
+
+    const qty = Number(input.qty ?? 1) || 1;
+    const unit = input.unit ?? 'unit';
+    const perish_by = input.perish_by ?? null;
+
+    const key = normalizeNameForKey(nameTrim);
+
+    // Look for an existing row in current state that matches this key + unit
+    const existing = items.find(
+      (i) => normalizeNameForKey(i.name) === key && i.unit === unit
+    );
+
+    if (existing) {
+      const newQty = existing.qty + qty;
+
+      const { error } = await supabase
+        .from('pantry_items')
+        .update({ qty: newQty })
+        .eq('id', existing.id)
+        .eq('user_id', userId);
+
+      if (error) {
+        console.error(error);
+        alert('Failed to update existing item.');
+        return;
+      }
+
+      // Optimistic local update
+      setItems((prev) =>
+        prev.map((i) => (i.id === existing.id ? { ...i, qty: newQty } : i))
+      );
+    } else {
+      const payload = {
+        user_id: userId,
+        name: nameTrim.toLowerCase(),
+        qty,
+        unit,
+        perish_by,
+      };
+
+      const { error } = await supabase.from('pantry_items').insert(payload);
+      if (error) {
+        console.error(error);
+        alert('Failed to add item.');
+        return;
+      }
+
+      // We'll let the caller decide when to call load() to refresh from DB.
+    }
   }
 
-  useEffect(() => {
-    load();
-  }, []);
-
-  async function add() {
-    const userId = await resolveUserId();
+    async function add() {
     if (!form.name.trim()) return;
 
-    const payload = {
-      user_id: userId,
-      name: form.name.trim().toLowerCase(),
-      qty: Number(form.qty) || 1,
+    await upsertPantryItem({
+      name: form.name,
+      qty: form.qty,
       unit: form.unit,
       perish_by: form.perish_by || null,
-    };
+    });
 
-    const { error } = await supabase.from('pantry_items').insert(payload);
-    if (!error) {
-      setForm({ name: '', qty: 1, unit: 'unit', perish_by: '' });
-      load();
-    } else {
-      console.error(error);
-      alert('Failed to add item.');
-    }
+    // Reset form + refresh from DB so everything is consistent
+    setForm({ name: '', qty: 1, unit: 'unit', perish_by: '' });
+    await load();
   }
 
   async function remove(id: string) {
@@ -233,25 +300,22 @@ export default function PantryPage() {
         )}
 
         {/* UPLOAD */}
-        {tab === 'upload' && (
+                {tab === 'upload' && (
           <UploadPhoto
             onConfirm={async (rows) => {
-              const userId = await resolveUserId();
               if (!rows.length) return;
-              const payload = rows.map(r => ({
-                user_id: userId,
-                name: r.name,
-                qty: r.qty ?? 1,
-                unit: r.unit ?? 'unit',
-                perish_by: null,
-              }));
-              const { error } = await supabase.from('pantry_items').insert(payload);
-              if (error) {
-                console.error(error);
-                alert('Failed to add detected items.');
-              } else {
-                load();
+
+              // Sequentially upsert each detected row
+              for (const r of rows) {
+                await upsertPantryItem({
+                  name: r.name,
+                  qty: r.qty ?? 1,
+                  unit: r.unit ?? 'unit',
+                  perish_by: null,
+                });
               }
+
+              await load();
             }}
           />
         )}
@@ -260,20 +324,13 @@ export default function PantryPage() {
         {tab === 'barcode' && (
           <BarcodeCapture
             onCommit={async (item) => {
-              const userId = await resolveUserId();
-              const { error } = await supabase.from('pantry_items').insert({
-                user_id: userId,
+              await upsertPantryItem({
                 name: item.name,
                 qty: item.qty ?? 1,
                 unit: item.unit ?? 'unit',
                 perish_by: null,
               });
-              if (error) {
-                console.error(error);
-                alert('Failed to add item.');
-              } else {
-                load();
-              }
+              await load();
             }}
           />
         )}
@@ -285,11 +342,11 @@ export default function PantryPage() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
               <colgroup>
-                <col className="w-[56%]" /> {/* Item (wider) */}
-                <col className="w-[10%]" /> {/* Qty */}
-                <col className="w-[10%]" /> {/* Unit */}
-                <col className="w-[16%]" /> {/* Perish by (more room) */}
-                <col className="w-[8%]"  /> {/* Actions */}
+                <col className="w-[56%]" /> 
+                <col className="w-[10%]" /> 
+                <col className="w-[10%]" /> 
+                <col className="w-[16%]" /> 
+                <col className="w-[8%]"  /> 
               </colgroup>
 
               <thead className="bg-gray-50 dark:bg-neutral-900">
@@ -496,13 +553,21 @@ function UploadPhoto({ onConfirm }: { onConfirm: (rows: { name: string; qty: num
         </ul>
         <div className="flex gap-3">
           <button
-            onClick={() =>
-              onConfirm(rows.map(r => ({ name: r.name, qty: r.qty ?? 1, unit: r.unit ?? 'unit' })))
-            }
-            className="rounded px-4 py-2 bg-black text-white dark:bg-white dark:text-black"
-          >
-            Add {rows.length} item(s)
-          </button>
+  onClick={async () => {
+    await onConfirm(
+      rows.map(r => ({
+        name: r.name,
+        qty: r.qty ?? 1,
+        unit: r.unit ?? 'unit',
+      }))
+    );
+    // Clear the detected list once items are added
+    setRows(null);
+  }}
+  className="rounded px-4 py-2 bg-black text-white dark:bg-white dark:text-black"
+>
+  Add {rows.length} item(s)
+</button>
           <button onClick={() => setRows(null)} className="text-sm underline">
             Back
           </button>
@@ -566,11 +631,19 @@ function BarcodeCapture({ onCommit }: { onCommit: (item: { name: string; qty?: n
               onChange={e => setLast({ ...last!, unit: e.target.value })}
             />
             <button
-              onClick={() => onCommit({ name: last.name, qty: last.qty ?? 1, unit: last.unit ?? 'unit' })}
-              className="ml-2 rounded px-3 py-1 bg-black text-white dark:bg-white dark:text-black"
-            >
-              Add to pantry
-            </button>
+  onClick={async () => {
+    await onCommit({
+      name: last.name,
+      qty: last.qty ?? 1,
+      unit: last.unit ?? 'unit',
+    });
+    // Clear the detected item once it’s been committed
+    setLast(null);
+  }}
+  className="ml-2 rounded px-3 py-1 bg-black text-white dark:bg-white dark:text-black"
+>
+  Add to pantry
+</button>
           </div>
         </div>
       )}
