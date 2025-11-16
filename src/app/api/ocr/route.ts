@@ -30,7 +30,9 @@ const nowMs = () => {
 };
 
 /** ---------- Feature switches & timeouts ---------- */
-const FAST_MODE = process.env.OCR_FAST_MODE !== 'false';
+const FAST_MODE =
+  process.env.NODE_ENV === 'production' ||
+  process.env.OCR_FAST === '1';
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS ?? 45_000);
 
 /** ---------- Per-attempt OCR timeouts (ms) ---------- */
@@ -1589,6 +1591,7 @@ dbg('[OCR] trace', {
 });
 
 // --- Google Vision backstop (only if our picks look weak) ---
+if (!FAST_MODE) {
 try {
   const MIN_LEN   = Number(process.env.OCR_VISION_TRIGGER_MINLEN  ?? 10);
   const MIN_SCORE = Number(process.env.OCR_VISION_TRIGGER_MINSCORE ?? 180);
@@ -1664,6 +1667,7 @@ try {
 } catch (e) {
   dbg('[OCR] vision backstop error:', (e as Error)?.message ?? e);
 }
+}   
 
 // Return a newline-joined blob (top line first)
 let finalText = candidates.join('\n');
