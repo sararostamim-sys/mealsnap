@@ -85,40 +85,47 @@ function ensureTesseractWasm() {
     console.log('[OCR] nestedDir exists?', nestedExists, 'path =', nestedDir);
     console.log('[OCR] rootDir exists?', rootExists, 'path =', rootDir);
 
-    if (nestedExists) {
-      const nestedFiles = fs.readdirSync(nestedDir);
-      console.log('[OCR] nestedDir files:', nestedFiles);
-
-      // If WASM is already there, nothing to do.
-      if (nestedFiles.includes('tesseract-core-simd.wasm')) {
-        console.log('[OCR] nestedDir already has tesseract-core-simd.wasm');
-        return;
-      }
+    if (!nestedExists || !rootExists) {
+      console.log('[OCR] either nestedDir or rootDir missing, skipping copy');
+      return;
     }
 
-    if (rootExists) {
-      const rootFiles = fs.readdirSync(rootDir);
-      console.log('[OCR] rootDir files:', rootFiles);
+    const nestedFiles = fs.readdirSync(nestedDir);
+    const rootFiles   = fs.readdirSync(rootDir);
 
-      const wasmName = 'tesseract-core-simd.wasm';
-      const rootWasmPath = path.join(rootDir, wasmName);
+    console.log('[OCR] nestedDir files:', nestedFiles);
+    console.log('[OCR] rootDir files:', rootFiles);
 
-      if (rootFiles.includes(wasmName) && nestedExists) {
-        const nestedWasmPath = path.join(nestedDir, wasmName);
-        try {
-          fs.copyFileSync(rootWasmPath, nestedWasmPath);
-          console.log('[OCR] copied WASM from rootDir to nestedDir');
-        } catch (e) {
-          console.log('[OCR] failed to copy WASM:', (e as Error)?.message || e);
-        }
-      } else {
-        console.log('[OCR] WASM not found in rootDir or nestedDir missing');
-      }
-    } else {
-      console.log('[OCR] rootDir does not exist; cannot copy WASM');
+    // If nested already has the wasm, nothing to do.
+    if (nestedFiles.includes('tesseract-core-simd.wasm')) {
+      console.log('[OCR] nestedDir already has tesseract-core-simd.wasm');
+      return;
+    }
+
+    // Choose a source wasm from rootDir:
+    // Prefer SIMD if it ever shows up there, otherwise fall back to non-SIMD.
+    const srcName = rootFiles.includes('tesseract-core-simd.wasm')
+      ? 'tesseract-core-simd.wasm'
+      : rootFiles.includes('tesseract-core.wasm')
+        ? 'tesseract-core.wasm'
+        : null;
+
+    if (!srcName) {
+      console.log('[OCR] no candidate wasm in rootDir; cannot satisfy tesseract-core-simd.wasm');
+      return;
+    }
+
+    const srcPath = path.join(rootDir, srcName);
+    const dstPath = path.join(nestedDir, 'tesseract-core-simd.wasm');
+
+    try {
+      fs.copyFileSync(srcPath, dstPath);
+      console.log('[OCR] copied', srcName, 'to nestedDir as tesseract-core-simd.wasm');
+    } catch (e) {
+      console.log('[OCR] failed to copy wasm:', (e as Error)?.message ?? e);
     }
   } catch (e) {
-    console.log('[OCR] ensureTesseractWasm error:', (e as Error)?.message || e);
+    console.log('[OCR] ensureTesseractWasm error:', (e as Error)?.message ?? e);
   }
 }
 
