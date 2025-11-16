@@ -246,17 +246,76 @@ function withTimeoutSoft<T>(p: Promise<T>, label: string, ms = OCR_SOFT_TIMEOUT_
   });
 }
 
+// Vision-only fast path used when FAST_MODE === true (production)
 async function runVisionFastPath(fileBuf: Buffer): Promise<string> {
-  try {
-    const vt = await detectTextFromBuffer(fileBuf);
-    if (!vt) return '';
-    // For now, just return the raw Vision text.
-    // Later we can reuse your FOODISH / candidates logic on this.
-    return vt;
-  } catch (e) {
-    dbg('[OCR] vision-fast error:', (e as Error)?.message ?? e);
+  // Call your existing Vision helper
+  const vt = await detectTextFromBuffer(fileBuf);
+
+  if (!vt) {
+    dbg('[OCR] vision fast path: empty text');
     return '';
   }
+
+  // Re-use the same style of heuristics as the Tesseract path,
+  // but scoped locally so we don't disturb your existing code.
+  const SIZE_LIKE = /\b(net\s*wt|net\s*weight|oz|ounce|lb|g|gram|grams|ml|made\s*with|sea\s*salt|serving|calories)\b/i;
+  const BOILER    = /\b(made\s*w[i1]th(?:\s+\w+){0,3}|sea\s*s?alt|ingredients?|nutrition|per\s+serv(?:ing)?|serv(?:ing|es)|calories?)\b/i;
+  const FOODISH   = /\b(beans?|kidney|black|pinto|pasta|fusilli|noodles?|rice|quinoa|tomato|sauce|lentils?|soup|chickpeas?|corn|peas|broth|olive|oil|tuna|salmon|peanut|butter)\b/i;
+  const BOILER_INNER = /\b(made\s+with(?:\s+\w+){0,3}|sea\s*salt)\b/gi;
+
+  // 1) Split Vision text into lines and normalize
+  const lines = vt
+    .split(/\r?\n+/)
+    .map((s) => postClean(clean(denoiseLine(s))))
+    .map((s) => s.replace(BOILER_INNER, '').replace(/\s{2,}/g, ' ').trim())
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  dbg('[OCR] vision fast raw lines:', lines);
+
+  // 2) Filter out junk: very short, non-wordy, size / boilerplate lines
+  const seenRaw = new Set<string>();
+  let candidates = lines
+    .filter((s) => {
+      if (s.length < 3) return false;                 // drop 'R'
+      if (!looksLikeWordy(s)) return false;          // drop things like "350a" if your helper says so
+      if (SIZE_LIKE.test(s)) return false;           // drop "Net Wt 155"
+      if (BOILER.test(s)) return false;              // drop "Made with Sea Salt"
+      if (seenRaw.has(s)) return false;
+      seenRaw.add(s);
+      return true;
+    });
+
+  // 3) Try to merge "Organic" + "Kidney Beans" style pairs
+  const merged = maybeMergeFoodPair(candidates.slice(0, 5));
+  if (merged) {
+    candidates.unshift(merged);
+    const seen2 = new Set<string>();
+    candidates = candidates.filter((x) => (seen2.has(x) ? false : (seen2.add(x), true)));
+  }
+
+  // 4) Rank: prefer food-ish lines, then by score/length
+  candidates.sort((a, b) => {
+    const fa = FOODISH.test(a) ? 1 : 0;
+    const fb = FOODISH.test(b) ? 1 : 0;
+    if (fa !== fb) return fb - fa;               // food-ish above non-food
+    return score(b) - score(a) || b.length - a.length;
+  });
+
+  dbg('[OCR] vision fast candidates:', candidates.slice(0, 5));
+
+  // 5) Pick a single best line
+  const best = candidates[0] || '';
+
+  if (best) {
+    dbg('[OCR] vision fast picked:', best);
+    return best;
+  }
+
+  // Fallback: if filters killed everything, just use the first normalized line
+  const fallback = lines[0] || '';
+  dbg('[OCR] vision fast fallback:', fallback);
+  return fallback;
 }
 
 // Soft-try a single recognize call. On timeout/error, log and return null so callers can continue.
