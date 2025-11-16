@@ -74,6 +74,54 @@ const GOOD_GENERAL_SCORE = Number(process.env.OCR_GOOD_GENERAL_SCORE ?? 1200);
 /** ---------- Resolve absolute Tesseract asset paths (GENERAL & PORTABLE) ---------- */
 const require = createRequire(import.meta.url);
 
+function ensureTesseractWasm() {
+  try {
+    const nestedDir = '/var/task/node_modules/tesseract.js/node_modules/tesseract.js-core';
+    const rootDir   = '/var/task/node_modules/tesseract.js-core';
+
+    const nestedExists = fs.existsSync(nestedDir);
+    const rootExists   = fs.existsSync(rootDir);
+
+    console.log('[OCR] nestedDir exists?', nestedExists, 'path =', nestedDir);
+    console.log('[OCR] rootDir exists?', rootExists, 'path =', rootDir);
+
+    if (nestedExists) {
+      const nestedFiles = fs.readdirSync(nestedDir);
+      console.log('[OCR] nestedDir files:', nestedFiles);
+
+      // If WASM is already there, nothing to do.
+      if (nestedFiles.includes('tesseract-core-simd.wasm')) {
+        console.log('[OCR] nestedDir already has tesseract-core-simd.wasm');
+        return;
+      }
+    }
+
+    if (rootExists) {
+      const rootFiles = fs.readdirSync(rootDir);
+      console.log('[OCR] rootDir files:', rootFiles);
+
+      const wasmName = 'tesseract-core-simd.wasm';
+      const rootWasmPath = path.join(rootDir, wasmName);
+
+      if (rootFiles.includes(wasmName) && nestedExists) {
+        const nestedWasmPath = path.join(nestedDir, wasmName);
+        try {
+          fs.copyFileSync(rootWasmPath, nestedWasmPath);
+          console.log('[OCR] copied WASM from rootDir to nestedDir');
+        } catch (e) {
+          console.log('[OCR] failed to copy WASM:', (e as Error)?.message || e);
+        }
+      } else {
+        console.log('[OCR] WASM not found in rootDir or nestedDir missing');
+      }
+    } else {
+      console.log('[OCR] rootDir does not exist; cannot copy WASM');
+    }
+  } catch (e) {
+    console.log('[OCR] ensureTesseractWasm error:', (e as Error)?.message || e);
+  }
+}
+
 // Strip Next’s virtual “(rsc)” segment that can appear in dev paths
 function stripRsc(p: string) {
   return p.replace(/[\\/]\(rsc\)(?=[\\/]|$)/g, '');
@@ -1180,7 +1228,8 @@ export async function POST(req: NextRequest) {
     console.log(`[OCR] ${label} @`, Date.now() - t0, 'ms');
   };
   console.log('[OCR] FAST_MODE =', FAST_MODE, 'NODE_ENV =', process.env.NODE_ENV);
-  logTesseractCoreFiles();   // <-- add this
+  ensureTesseractWasm();
+
   try {
     const form = await req.formData();
     const file = form.get('image') as File | null;

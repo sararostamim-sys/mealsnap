@@ -2,7 +2,7 @@
   "regions": ["iad1"],
   "functions": {
     "app/api/ocr/route.ts": {
-      "includeFiles": "node_modules/tesseract.js/node_modules/tesseract.js-core/**"
+      "includeFiles": "node_modules/tesseract.js-core/**"
     }
   }
 }
