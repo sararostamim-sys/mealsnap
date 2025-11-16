@@ -29,10 +29,13 @@ const nowMs = () => {
   return p?.now ? p.now() : Date.now();
 };
 
-/** ---------- Feature switches & timeouts ---------- */
+// Fast mode: keep OCR lighter in production to avoid timeouts.
+// - In production: FAST_MODE = true
+// - In dev:        FAST_MODE = false (unless you override with OCR_FAST=1)
 const FAST_MODE =
   process.env.NODE_ENV === 'production' ||
   process.env.OCR_FAST === '1';
+
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS ?? 45_000);
 
 /** ---------- Per-attempt OCR timeouts (ms) ---------- */
@@ -1314,7 +1317,8 @@ if (merged) {
 }
 
 // ---- Label-band guard: try a couple of short, focused band reads if top looks brand-only ----
-if (candidates.length) {
+// In FAST_MODE (production), skip this extra work to avoid timeouts.
+if (!FAST_MODE && candidates.length) {
   const FOODISH = /\b(beans?|pasta|rice|sauce|tomato|lentils?|soup|chickpeas?|corn|peas|broth|noodles?|olive|oil|tuna|salmon|apple|peach|peanut|butter)\b/i;
   const brandNorm = brandText ? postClean(brandText).toLowerCase() : '';
   const topNorm   = postClean(candidates[0]).toLowerCase();
