@@ -36,6 +36,8 @@ const FAST_MODE =
   process.env.NODE_ENV === 'production' ||
   process.env.OCR_FAST === '1';
 
+console.log('[OCR] FAST_MODE =', FAST_MODE, 'NODE_ENV =', process.env.NODE_ENV);
+
 const OCR_TIMEOUT_MS = Number(process.env.OCR_TIMEOUT_MS ?? 45_000);
 
 /** ---------- Per-attempt OCR timeouts (ms) ---------- */
@@ -1157,6 +1159,10 @@ if (FAST_MODE) {
 
 /** ---------------- Handler ---------------- */
 export async function POST(req: NextRequest) {
+  const t0 = Date.now();
+  const mark = (label: string) => {
+    console.log(`[OCR] ${label} @`, Date.now() - t0, 'ms');
+  };
   try {
     const form = await req.formData();
     const file = form.get('image') as File | null;
@@ -1218,6 +1224,7 @@ if (FAST_MODE) {
 // ----- OCR in parallel -----
 // Do general first; if strong, skip brand/size to return fast
 const generalTextTop5 = await recognizeGeneral(general, worker);
+mark('recognizeGeneral done');
 const bestGeneral = generalTextTop5?.[0] ?? '';
 const generalScore = score(bestGeneral);
 
@@ -1240,6 +1247,7 @@ if (generalScore < GOOD_GENERAL_SCORE) {
   brandText    = postClean(b || '');
   sizeGuessText = s1 || '';
   sizeRoiText   = s2 || '';
+  mark('brand/size recognitions done');
 }
 
 // ----- Cleanup temp files -----
@@ -1700,10 +1708,14 @@ if (process.env.NODE_ENV !== 'production') {
   dbg('[OCR] final candidates (top→):', candidates.slice(0, 5));
 }
 
+mark('finalText built');
+
 return finalText;
     });
 
-        return NextResponse.json({ ok: true, text });
+mark('about to return response');
+
+return NextResponse.json({ ok: true, text });
   } catch (e) {
     console.error('[OCR] route error:', e);
 
