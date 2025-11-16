@@ -1157,12 +1157,30 @@ if (FAST_MODE) {
   return Array.from(texts).join('\n');
 }
 
+function logTesseractCoreFiles() {
+  try {
+    const coreDir = '/var/task/node_modules/tesseract.js/node_modules/tesseract.js-core';
+
+    const exists = fs.existsSync(coreDir);
+    console.log('[OCR] coreDir exists?', exists, 'path =', coreDir);
+
+    if (exists) {
+      const files = fs.readdirSync(coreDir);
+      console.log('[OCR] coreDir files:', files);
+    }
+  } catch (e) {
+    console.log('[OCR] coreDir inspection error:', (e as Error)?.message || e);
+  }
+}
+
 /** ---------------- Handler ---------------- */
 export async function POST(req: NextRequest) {
   const t0 = Date.now();
   const mark = (label: string) => {
     console.log(`[OCR] ${label} @`, Date.now() - t0, 'ms');
   };
+  console.log('[OCR] FAST_MODE =', FAST_MODE, 'NODE_ENV =', process.env.NODE_ENV);
+  logTesseractCoreFiles();   // <-- add this
   try {
     const form = await req.formData();
     const file = form.get('image') as File | null;
