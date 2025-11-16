@@ -74,61 +74,6 @@ const GOOD_GENERAL_SCORE = Number(process.env.OCR_GOOD_GENERAL_SCORE ?? 1200);
 /** ---------- Resolve absolute Tesseract asset paths (GENERAL & PORTABLE) ---------- */
 const require = createRequire(import.meta.url);
 
-function ensureTesseractWasm() {
-  try {
-    const nestedDir = '/var/task/node_modules/tesseract.js/node_modules/tesseract.js-core';
-    const rootDir   = '/var/task/node_modules/tesseract.js-core';
-
-    const nestedExists = fs.existsSync(nestedDir);
-    const rootExists   = fs.existsSync(rootDir);
-
-    console.log('[OCR] nestedDir exists?', nestedExists, 'path =', nestedDir);
-    console.log('[OCR] rootDir exists?', rootExists, 'path =', rootDir);
-
-    if (!nestedExists || !rootExists) {
-      console.log('[OCR] either nestedDir or rootDir missing, skipping copy');
-      return;
-    }
-
-    const nestedFiles = fs.readdirSync(nestedDir);
-    const rootFiles   = fs.readdirSync(rootDir);
-
-    console.log('[OCR] nestedDir files:', nestedFiles);
-    console.log('[OCR] rootDir files:', rootFiles);
-
-    // If nested already has the wasm, nothing to do.
-    if (nestedFiles.includes('tesseract-core-simd.wasm')) {
-      console.log('[OCR] nestedDir already has tesseract-core-simd.wasm');
-      return;
-    }
-
-    // Choose a source wasm from rootDir:
-    // Prefer SIMD if it ever shows up there, otherwise fall back to non-SIMD.
-    const srcName = rootFiles.includes('tesseract-core-simd.wasm')
-      ? 'tesseract-core-simd.wasm'
-      : rootFiles.includes('tesseract-core.wasm')
-        ? 'tesseract-core.wasm'
-        : null;
-
-    if (!srcName) {
-      console.log('[OCR] no candidate wasm in rootDir; cannot satisfy tesseract-core-simd.wasm');
-      return;
-    }
-
-    const srcPath = path.join(rootDir, srcName);
-    const dstPath = path.join(nestedDir, 'tesseract-core-simd.wasm');
-
-    try {
-      fs.copyFileSync(srcPath, dstPath);
-      console.log('[OCR] copied', srcName, 'to nestedDir as tesseract-core-simd.wasm');
-    } catch (e) {
-      console.log('[OCR] failed to copy wasm:', (e as Error)?.message ?? e);
-    }
-  } catch (e) {
-    console.log('[OCR] ensureTesseractWasm error:', (e as Error)?.message ?? e);
-  }
-}
-
 // Strip Next’s virtual “(rsc)” segment that can appear in dev paths
 function stripRsc(p: string) {
   return p.replace(/[\\/]\(rsc\)(?=[\\/]|$)/g, '');
@@ -299,6 +244,19 @@ function withTimeoutSoft<T>(p: Promise<T>, label: string, ms = OCR_SOFT_TIMEOUT_
       (e) => { clearTimeout(id); console.warn(`[OCR] soft-fail ${label}`, e?.message ?? e); resolve(null); },
     );
   });
+}
+
+async function runVisionFastPath(fileBuf: Buffer): Promise<string> {
+  try {
+    const vt = await detectTextFromBuffer(fileBuf);
+    if (!vt) return '';
+    // For now, just return the raw Vision text.
+    // Later we can reuse your FOODISH / candidates logic on this.
+    return vt;
+  } catch (e) {
+    dbg('[OCR] vision-fast error:', (e as Error)?.message ?? e);
+    return '';
+  }
 }
 
 // Soft-try a single recognize call. On timeout/error, log and return null so callers can continue.
@@ -513,11 +471,22 @@ if (typeof gzip === 'boolean') {
 }
 
 async function withWorker<T>(req: NextRequest, fn: (w: TWorker) => Promise<T>): Promise<T> {
-  const w = await getWorker(req);
+  // Dynamic import: only run when we actually need Tesseract (i.e., not in FAST_MODE / prod)
+  const { createWorker } = await import('tesseract.js');
+
+  // Your existing lang config + base options
+  const { langPath, gzip } = resolveLangConfig(req);
+
+  const worker = await createWorker({
+    ...TESS_OPTS_BASE,
+    langPath,
+    gzip,
+  });
+
   try {
-    return await fn(w);
+    return await fn(worker as TWorker);
   } finally {
-    await (w as any).terminate().catch(() => {});
+    await (worker as any).terminate().catch(() => {});
   }
 }
 
@@ -1235,7 +1204,6 @@ export async function POST(req: NextRequest) {
     console.log(`[OCR] ${label} @`, Date.now() - t0, 'ms');
   };
   console.log('[OCR] FAST_MODE =', FAST_MODE, 'NODE_ENV =', process.env.NODE_ENV);
-  ensureTesseractWasm();
 
   try {
     const form = await req.formData();
@@ -1257,539 +1225,550 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const text = await withWorker(req, async (worker) => {
-      const { general, sizeOnly, brandOnly, orientedFull, W, H } = await buildVariants(fileBuf, worker, req);
+    let text: string;
 
-      // ROI pass only in non-FAST mode
-      let roiVariants: Buffer[] = [];
-if (false && !FAST_MODE) {  // TEMP: disable ROI seed pass to avoid timeouts
-  try {
-    const rois = await findSizeROIs(orientedFull, W, H, worker);
-    if (rois.length) roiVariants = await makeSizeROIVariants(orientedFull, rois);
-  } catch {
-    /* best-effort */
-  }
-}
+    if (FAST_MODE) {
+      // Production: Vision-only path, no Tesseract
+      mark('using Vision-only fast path');
+      text = await runVisionFastPath(fileBuf);
+    } else {
+      // Dev / non-FAST: full Tesseract + Vision backstop pipeline
+      mark('using Tesseract path');
+      text = await withWorker(req, async (worker) => {
+        const { general, sizeOnly, brandOnly, orientedFull, W, H } = await buildVariants(fileBuf, worker, req);
 
-     // If we're in FAST mode, feed tesseract a FILE PATH for the first general image.
-// This avoids occasional WASM stalls on Buffer decoding in node.
-// ----- Prepare FAST-mode inputs as file paths for first variants -----
-// ----- Prepare FAST-mode inputs as file paths for first variants -----
-let tmpGeneralPath: string | undefined;
-let tmpBrandPath:   string | undefined;
-let tmpSizePath:    string | undefined;
-
-let generalInput: Array<Buffer | string> = general;
-let brandInput:   Array<Buffer | string> = brandOnly;
-let sizeInput:    Array<Buffer | string> = sizeOnly;
-
-if (FAST_MODE) {
-  if (general.length > 0 && Buffer.isBuffer(general[0])) {
-    try { tmpGeneralPath = await writeTempJpeg(general[0]); generalInput = [tmpGeneralPath]; } catch {}
-  }
-  if (brandOnly.length > 0 && Buffer.isBuffer(brandOnly[0])) {
-    try { tmpBrandPath = await writeTempJpeg(brandOnly[0]); brandInput = [tmpBrandPath]; } catch {}
-  }
-  if (sizeOnly.length > 0 && Buffer.isBuffer(sizeOnly[0])) {
-    try { tmpSizePath = await writeTempJpeg(sizeOnly[0]); sizeInput = [tmpSizePath]; } catch {}
-  }
-}
-
-// ----- OCR in parallel -----
-// Do general first; if strong, skip brand/size to return fast
-const generalTextTop5 = await recognizeGeneral(general, worker);
-mark('recognizeGeneral done');
-const bestGeneral = generalTextTop5?.[0] ?? '';
-const generalScore = score(bestGeneral);
-
-let brandText = '';
-if (process.env.NODE_ENV !== 'production') {
-  dbg('[OCR] assembly inputs', {
-    generalTop5: generalTextTop5,
-    brandText,
-  });
-}
-let sizeGuessText = '';
-let sizeRoiText = '';
-
-if (generalScore < GOOD_GENERAL_SCORE) {
-  const [b, s1, s2] = await Promise.all([
-    recognizeBrand(brandOnly, worker),
-    recognizeSize(sizeOnly, worker),
-    roiVariants.length ? recognizeSize(roiVariants, worker) : Promise.resolve(''),
-  ]);
-  brandText    = postClean(b || '');
-  sizeGuessText = s1 || '';
-  sizeRoiText   = s2 || '';
-  mark('brand/size recognitions done');
-}
-
-// ----- Cleanup temp files -----
-await safeUnlink(tmpGeneralPath);
-await safeUnlink(tmpBrandPath);
-await safeUnlink(tmpSizePath);
-
-// Build one blob for ranking, then pick the single best line.
-const blobForName = [
-  ...(generalTextTop5 || []),
-  brandText,
-].filter(Boolean).join('\n');
-
-let best = extractBestLine(blobForName);
-
-// Optional: if brand is present, strip it once from the chosen line.
-if (brandText && best) {
-  best = postClean(stripBrandOnce(best, brandText));
-}
-
-// Build the candidate lines for the "name" blob.
-// IMPORTANT: exclude size lines from the blob so they don't hijack the product name.
-const parts = [
-  ...(generalTextTop5 || []),
-  brandText,
-  // sizeGuessText, // excluded from blob
-  // sizeRoiText,   // excluded from blob
-];
-
-
-// Lines we consider "size-like" or boilerplate that should not name the product.
-const SIZE_LIKE = /\b(net\s*wt|net\s*weight|oz|ounce|lb|g|gram|grams|ml|made\s*with|sea\s*salt|serving|calories)\b/i;
-const BOILER    = /\b(made\s*w[i1]th(?:\s+\w+){0,3}|sea\s*s?alt|ingredients?|nutrition|per\s+serv(?:ing)?|serv(?:ing|es)|calories?)\b/i;
-
-// NEW:
-const FOODISH      = /\b(beans?|kidney|black|pinto|pasta|fusilli|noodles?|rice|quinoa|tomato|sauce|lentils?|soup|chickpeas?|corn|peas|broth|olive|oil|tuna|salmon|peanut|butter)\b/i;
-const BOILER_INNER = /\b(made\s+with(?:\s+\w+){0,3}|sea\s*salt)\b/gi;
-
-const seen = new Set<string>();
-let candidates: string[] = clean(parts.filter(Boolean).join('\n'))
-  .split(/\n+/)
-  .map(s => postClean(s))                                  // normalize + fuzzy
-  .map(s => s.replace(BOILER_INNER, '').replace(/\s{2,}/g, ' ').trim())  // <- strip inner boilerplate
-  .map(s => s.trim())
-  .filter(s => s && looksLikeWordy(s) && !SIZE_LIKE.test(s) && !BOILER.test(s))
-  .filter(s => (seen.has(s) ? false : (seen.add(s), true)));
-
-candidates.sort((a, b) => {
-  const fa = FOODISH.test(a) ? 1 : 0;
-  const fb = FOODISH.test(b) ? 1 : 0;
-  if (fa !== fb) return fb - fa;             // prefer food-ish lines
-  return score(b) - score(a) || b.length - a.length;
-});
-
-if (process.env.NODE_ENV !== 'production') {
-  dbg('[OCR] candidates(before guards)', candidates.slice(0, 8));
-}
-
-// 3) (Optional but effective) Merge "Organic" + food line from the top few
-const merged = maybeMergeFoodPair(candidates.slice(0, 5));
-if (merged) {
-  // Put merged at the front, then stable-dedupe and re-rank
-  candidates.unshift(merged);
-
-  // stable-dedupe again
-  const seen2 = new Set<string>();
-  candidates = candidates.filter((x) => (seen2.has(x) ? false : (seen2.add(x), true)));
-
-  // re-rank using your scorer
-  candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
-
-  if (process.env.NODE_ENV !== 'production') {
-    dbg('[OCR] after merge', candidates.slice(0, 5));
-  }
-}
-
-// ---- Label-band guard: try a couple of short, focused band reads if top looks brand-only ----
-// In FAST_MODE (production), skip this extra work to avoid timeouts.
-if (!FAST_MODE && candidates.length) {
-  const FOODISH = /\b(beans?|pasta|rice|sauce|tomato|lentils?|soup|chickpeas?|corn|peas|broth|noodles?|olive|oil|tuna|salmon|apple|peach|peanut|butter)\b/i;
-  const brandNorm = brandText ? postClean(brandText).toLowerCase() : '';
-  const topNorm   = postClean(candidates[0]).toLowerCase();
-  const topLooksBrandOnly =
-    brandNorm &&
-    (topNorm === brandNorm || topNorm.startsWith(brandNorm + ' ')) &&
-    !FOODISH.test(candidates[0]);
-
-  if (topLooksBrandOnly && generalInput?.length && Buffer.isBuffer(generalInput[0])) {
-    try {
-      // 2 quick crops: mid band and lower band
-      const base = await downscaleIfNeeded(generalInput[0] as Buffer, 1100); // a tad larger than 900
-      const mid  = await cropBandPct(base, 0.35, 0.72);   // middle of label
-      const low  = await cropBandPct(base, 0.60, 0.92);   // lower band (often the food name)
-
-      // Try raw + binarized for each band (each attempt is short)
-      const attempts: Buffer[] = [];
-      attempts.push(mid, await binarizeWhiteOnColor(mid));
-      attempts.push(low, await binarizeWhiteOnColor(low));
-
-      for (const [k, img] of attempts.entries()) {
-  // pass 1: normal
-  const txt = await tryRecognize(
-    worker,
-    img,
-    {
-      tessedit_pageseg_mode: k % 2 === 0 ? '7' : '11',   // 7: single-line, 11: sparse
-      preserve_interword_spaces: '1',
-      user_defined_dpi: '300',
-      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
-    },
-    `recognize:labelband:${k}`,
-    STEP_MS_SIZE_FAST
-  );
-
-  // pass 2: inverted (helps white-on-red/white-on-dark banners)
-  const txtInv = await tryRecognize(
-    worker,
-    img,
-    {
-      tessedit_pageseg_mode: '7',
-      preserve_interword_spaces: '1',
-      tessedit_do_invert: '1',
-      user_defined_dpi: '300',
-      tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
-    },
-    `recognize:labelband:invert:${k}`,
-    STEP_MS_SIZE_FAST
-  );
-
-  // handle a result (shared helper)
-  const handle = (raw: string | null) => {
-    if (!raw) return false;
-    const best = extractBestLine(raw) || postClean(clean(raw));
-    if (!best) return false;
-
-    candidates.push(best);
-
-    // stable-dedupe + re-rank
-    const seenLB = new Set<string>();
-    candidates = candidates.filter(x => (seenLB.has(x) ? false : (seenLB.add(x), true)));
-    candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
-
-    // stop early if we now have a food-ish top line
-    return FOODISH.test(candidates[0]);
-  };
-
-  if (handle(txt)) break;
-  if (handle(txtInv)) break;
-}
-    } catch {
-      /* best effort */
-    }
-  }
-}
-
-// If top line is just the brand, try a cheap extra sparse read to pull food words.
-if (brandText && candidates.length) {
-  const brandNorm = postClean(brandText).toLowerCase();
-  const topNorm   = postClean(candidates[0]).toLowerCase();
-  const topIsBrand = topNorm === brandNorm || topNorm.startsWith(brandNorm + ' ');
-
-  const src0: Buffer | string | undefined = generalInput?.[0]; // may be Buffer OR string path
-  if (topIsBrand && src0) {
-    try {
-      // If we have a Buffer, lightly downscale; if it's a path, pass it through directly.
-      const img: Buffer | string = Buffer.isBuffer(src0)
-        ? await downscaleIfNeeded(src0 as Buffer, 900)
-        : (src0 as string);
-
-      const extra = await tryRecognize(
-        worker,
-        img,
-        {
-          tessedit_pageseg_mode: '11',            // sparse
-          preserve_interword_spaces: '1',
-          user_defined_dpi: '300',
-          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
-        },
-        'recognize:general:guard-psm11',
-        STEP_MS_SIZE_FAST                         // keep it short
-      );
-
-      if (extra) {
-        // Prefer the best food-ish line from the blob, fall back to cleaned whole text.
-        const best = extractBestLine(extra) || postClean(clean(extra));
-        if (best) {
-          candidates.push(best);
-
-          // stable-dedupe + re-rank
-          const seenX = new Set<string>();
-          candidates = candidates.filter(x => (seenX.has(x) ? false : (seenX.add(x), true)));
-          candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+        // ROI pass only in non-FAST mode
+        let roiVariants: Buffer[] = [];
+        if (false && !FAST_MODE) {  // TEMP: disable ROI seed pass to avoid timeouts
+          try {
+            const rois = await findSizeROIs(orientedFull, W, H, worker);
+            if (rois.length) roiVariants = await makeSizeROIVariants(orientedFull, rois);
+          } catch {
+            /* best-effort */
+          }
         }
-      }
-    } catch {
-      /* best effort; ignore */
-    }
-  }
-  if (process.env.NODE_ENV !== 'production') {
-  dbg('[OCR] after band-guard', candidates.slice(0, 5));
-}
-  // end of band-guard block
-}
 
-// If we recognized a brand, gently demote a pure-brand line below food-ish lines.
-if (brandText && candidates.length > 1) {
-  const brandNorm = postClean(brandText).toLowerCase();
+        // If we're in FAST mode, feed tesseract a FILE PATH for the first general image.
+        // This avoids occasional WASM stalls on Buffer decoding in node.
+        // ----- Prepare FAST-mode inputs as file paths for first variants -----
+        let tmpGeneralPath: string | undefined;
+        let tmpBrandPath:   string | undefined;
+        let tmpSizePath:    string | undefined;
 
-  // words that indicate the *food* (tune as you like)
-  const FOODISH = /\b(beans?|pasta|rice|sauce|tomato|lentils?|soup|chickpeas?|corn|peas|broth|noodles?|olive|oil|tuna|salmon|apple|peach|peanut|butter)\b/i;
+        let generalInput: Array<Buffer | string> = general;
+        let brandInput:   Array<Buffer | string> = brandOnly;
+        let sizeInput:    Array<Buffer | string> = sizeOnly;
 
-  function isBrandOnly(s: string) {
-    const n = postClean(s).toLowerCase();
-    // treat "trader joe's", "trader joe's organic" etc. as brand-only
-    const starts = n.startsWith(brandNorm);
-    const hasFood = FOODISH.test(s);
-    return starts && !hasFood && n.replace(brandNorm, '').trim().length <= 10; // short tail like "organic"
-  }
+        if (FAST_MODE) {
+          if (general.length > 0 && Buffer.isBuffer(general[0])) {
+            try { tmpGeneralPath = await writeTempJpeg(general[0]); generalInput = [tmpGeneralPath]; } catch {}
+          }
+          if (brandOnly.length > 0 && Buffer.isBuffer(brandOnly[0])) {
+            try { tmpBrandPath = await writeTempJpeg(brandOnly[0]); brandInput = [tmpBrandPath]; } catch {}
+          }
+          if (sizeOnly.length > 0 && Buffer.isBuffer(sizeOnly[0])) {
+            try { tmpSizePath = await writeTempJpeg(sizeOnly[0]); sizeInput = [tmpSizePath]; } catch {}
+          }
+        }
 
-  // Stable re-order: keep food-ish lines above a brand-only line
-  candidates.sort((a, b) => {
-    const aBrandOnly = isBrandOnly(a);
-    const bBrandOnly = isBrandOnly(b);
-    if (aBrandOnly && !bBrandOnly) return 1;   // push brand-only down
-    if (!aBrandOnly && bBrandOnly) return -1;  // keep food up
-    // otherwise keep your existing ranking
-    return score(b) - score(a) || b.length - a.length;
-  });
+        // ----- OCR in parallel -----
+        // Do general first; if strong, skip brand/size to return fast
+        const generalTextTop5 = await recognizeGeneral(general, worker);
+        mark('recognizeGeneral done');
+        const bestGeneral = generalTextTop5?.[0] ?? '';
+        const generalScore = score(bestGeneral);
 
-  if (process.env.NODE_ENV !== 'production') {
-  dbg('[OCR] after brand-demote', candidates.slice(0, 5));
-}
-}
+        let brandText = '';
+        if (process.env.NODE_ENV !== 'production') {
+          dbg('[OCR] assembly inputs', {
+            generalTop5: generalTextTop5,
+            brandText,
+          });
+        }
+        let sizeGuessText = '';
+        let sizeRoiText = '';
 
-// (debug) inputs to the band-guard
-if (process.env.NODE_ENV !== 'production') {
-  dbg('[OCR] guard inputs', {
-    top: candidates[0],
-    brandText,
-    hasGeneralInput: !!(generalInput?.length),
-  });
-}
+        if (generalScore < GOOD_GENERAL_SCORE) {
+          const [b, s1, s2] = await Promise.all([
+            recognizeBrand(brandOnly, worker),
+            recognizeSize(sizeOnly, worker),
+            roiVariants.length ? recognizeSize(roiVariants, worker) : Promise.resolve(''),
+          ]);
+          brandText     = postClean(b || '');
+          sizeGuessText = s1 || '';
+          sizeRoiText   = s2 || '';
+          mark('brand/size recognitions done');
+        }
 
-// Backstop: if top is still just the brand, try one sparse read on the full oriented image.
-if (brandText && candidates.length) {
-  const brandNorm = postClean(brandText).toLowerCase();
-  const topNorm   = postClean(candidates[0]).toLowerCase();
-  const topIsBrand = topNorm === brandNorm || topNorm.startsWith(brandNorm + ' ');
+        // ----- Cleanup temp files -----
+        await safeUnlink(tmpGeneralPath);
+        await safeUnlink(tmpBrandPath);
+        await safeUnlink(tmpSizePath);
 
-  if (topIsBrand && orientedFull) {
-    try {
-      const extra2 = await tryRecognize(
-        worker,
-        orientedFull,                             // full image Buffer
-        {
-          tessedit_pageseg_mode: '11',
-          preserve_interword_spaces: '1',
-          user_defined_dpi: '300',
-          tessedit_char_whitelist:
-            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
-        },
-        'recognize:general:guard-psm11-full',
-        STEP_MS_SIZE_SLOW                         // a touch looser than FAST; still bounded
-      );
+        // Build one blob for ranking, then pick the single best line.
+        const blobForName = [
+          ...(generalTextTop5 || []),
+          brandText,
+        ].filter(Boolean).join('\n');
 
-      const best2 = extra2 ? extractBestLine(extra2) : '';
-      if (best2) {
-        candidates.push(best2);
-        const seenY = new Set<string>();
-        candidates = candidates.filter(x => (seenY.has(x) ? false : (seenY.add(x), true)));
-        candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
-      }
-    } catch { /* best effort */ }
-  }
-}
+        let best = extractBestLine(blobForName);
 
-// If we recognized a brand, gently demote a pure-brand line below food-ish lines.
-if (brandText && candidates.length) {
-  const brandNorm = postClean(brandText).toLowerCase();
-  candidates.sort((a, b) => {
-    const an = a.toLowerCase();
-    const bn = b.toLowerCase();
-    const aIsBrand = an === brandNorm || an.startsWith(brandNorm + ' ');
-    const bIsBrand = bn === brandNorm || bn.startsWith(brandNorm + ' ');
-    if (aIsBrand && !bIsBrand) return 1;   // push brand down
-    if (!aIsBrand && bIsBrand) return -1;  // keep food up
-    return 0;
-  });
-}
+        // Optional: if brand is present, strip it once from the chosen line.
+        if (brandText && best) {
+          best = postClean(stripBrandOnce(best, brandText));
+        }
 
-// (Optional) when both brand & name present, drop the brand once from the top line
-if (brandText && candidates.length) {
-  candidates[0] = postClean(stripBrandOnce(candidates[0], brandText));
-}
+        // Build the candidate lines for the "name" blob.
+        // IMPORTANT: exclude size lines from the blob so they don't hijack the product name.
+        const parts = [
+          ...(generalTextTop5 || []),
+          brandText,
+          // sizeGuessText, // excluded from blob
+          // sizeRoiText,   // excluded from blob
+        ];
 
-// After your existing candidates.sort(...) that ranks best-first:
-candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+        // Lines we consider "size-like" or boilerplate that should not name the product.
+        const SIZE_LIKE = /\b(net\s*wt|net\s*weight|oz|ounce|lb|g|gram|grams|ml|made\s*with|sea\s*salt|serving|calories)\b/i;
+        const BOILER    = /\b(made\s*w[i1]th(?:\s+\w+){0,3}|sea\s*s?alt|ingredients?|nutrition|per\s+serv(?:ing)?|serv(?:ing|es)|calories?)\b/i;
 
-// >>> POLISH + re-dedupe + re-rank <<<
-candidates = candidates.map(polishFoodLine);
+        // NEW:
+        const FOODISH      = /\b(beans?|kidney|black|pinto|pasta|fusilli|noodles?|rice|quinoa|tomato|sauce|lentils?|soup|chickpeas?|corn|peas|broth|olive|oil|tuna|salmon|peanut|butter)\b/i;
+        const BOILER_INNER = /\b(made\s+with(?:\s+\w+){0,3}|sea\s*salt)\b/gi;
 
-// stable-dedupe again after polish (polish can make two lines equal)
-{
-  const seen = new Set<string>();
-  candidates = candidates.filter(x => (seen.has(x) ? false : (seen.add(x), true)));
-}
-
-// Prefer FOODISH lines first (you already have a sorter; reuse or inline)
-candidates.sort((a, b) => {
-  const fa = FOODISH.test(a) ? 1 : 0;
-  const fb = FOODISH.test(b) ? 1 : 0;
-  if (fa !== fb) return fb - fa;               // food-ish above non-food
-  return score(b) - score(a) || b.length - a.length;
-});
-
-// (Optional) tiny guard: if top is brand-only and #2 is food-ish, swap
-if (candidates.length > 1) {
-  const topIsFood = FOODISH.test(candidates[0]);
-  const secondIsFood = FOODISH.test(candidates[1]);
-  if (!topIsFood && secondIsFood) {
-    [candidates[0], candidates[1]] = [candidates[1], candidates[0]];
-  }
-}
-
-// If the top line is clearly a food name, prune non-food (brand-only) lines below it.
-if (candidates.length > 1 && FOODISH.test(candidates[0])) {
-  // Keep the top; drop any non-FOODISH lines that follow (brands, slogans, etc.)
-  candidates = [candidates[0], ...candidates.slice(1).filter(s => FOODISH.test(s))];
-
-  // (Optional) If you want to be slightly stricter about known brand words:
-  // const BRANDISH = /\b(trader\s+joe'?s?|kirkland|whole\s+foods|barilla|goya|heinz|campbell'?s)\b/i;
-  // candidates = [candidates[0], ...candidates.slice(1).filter(s => FOODISH.test(s) && !BRANDISH.test(s))];
-}
-
-// If top is food-ish, drop any pure brand-only tails from the remainder
-if (candidates.length) {
-  const topIsFood = FOODISH.test(candidates[0]);
-  if (topIsFood && brandText) {
-    const brandNorm = postClean(brandText).toLowerCase();
-    candidates = candidates.filter((s, i) => {
-      if (i === 0) return true;
-      const n = postClean(s).toLowerCase();
-      const isBrandOnly = n === brandNorm || n.startsWith(brandNorm + ' ');
-      return !isBrandOnly;
-    });
-  }
-}
-
-dbg('[OCR] trace', {
-  generalTop5: generalTextTop5,   // <-- use the variable you actually have
-  brandText,
-  candidatesTop5: candidates.slice(0, 5),
-});
-
-// --- Google Vision backstop (only if our picks look weak) ---
-if (!FAST_MODE) {
-try {
-  const MIN_LEN   = Number(process.env.OCR_VISION_TRIGGER_MINLEN  ?? 10);
-  const MIN_SCORE = Number(process.env.OCR_VISION_TRIGGER_MINSCORE ?? 180);
-
-  const top = candidates[0] ?? '';
-
-  // Trigger Vision if:
-  // - Tesseract found nothing, OR
-  // - the top line doesn't look like food AND (it's very short OR low score)
-  const looksWeak =
-    candidates.length === 0 ||
-    (!FOODISH.test(top) &&
-      (
-        top.replace(/[^A-Za-z]/g, '').length < MIN_LEN ||
-        score(top) < MIN_SCORE
-      )
-    );
-
-  dbg('[OCR] trigger check', {
-    top,
-    len: top.replace(/[^A-Za-z]/g, '').length,
-    score: score(top),
-    MIN_LEN, MIN_SCORE,
-    looksWeak,
-  });
-
-  // Prefer the main input buffer
-  const src: Buffer | undefined = generalInput?.[0] as Buffer | undefined;
-
-  if (looksWeak && src && Buffer.isBuffer(src)) {
-    // --- timing start ---
-    const t0 = nowMs && typeof nowMs === 'function' ? nowMs() : Date.now();
-
-    const vt = await detectTextFromBuffer(src);
-
-    const elapsed = Math.round(
-      (nowMs && typeof nowMs === 'function' ? nowMs() : Date.now()) - t0
-    );
-    dbg('[OCR] vision.fallback.ms', elapsed);
-    // --- timing end ---
-
-    if (vt) {
-      // Normalize Vision text the same way as Tesseract lines
-      const visCands = vt
-        .split(/\r?\n+/)
-        .map((s) => postClean(clean(denoiseLine(s))))
-        .map((s) => polishFoodLine(s))
-        .map((s) => s.trim())
-        .filter(Boolean);
-
-      if (visCands.length) {
-        // Merge → stable-dedupe (Vision first so a good food line can bubble up)
-        const merged = [...visCands, ...candidates];
-        const uniq: string[] = [];
         const seen = new Set<string>();
-        for (const s of merged) if (!seen.has(s)) { seen.add(s); uniq.push(s); }
+        let candidates: string[] = clean(parts.filter(Boolean).join('\n'))
+          .split(/\n+/)
+          .map(s => postClean(s))                                  // normalize + fuzzy
+          .map(s => s.replace(BOILER_INNER, '').replace(/\s{2,}/g, ' ').trim())  // <- strip inner boilerplate
+          .map(s => s.trim())
+          .filter(s => s && looksLikeWordy(s) && !SIZE_LIKE.test(s) && !BOILER.test(s))
+          .filter(s => (seen.has(s) ? false : (seen.add(s), true)));
 
-        // Prefer food-ish, then your score, then length
-        uniq.sort((a, b) => {
+        candidates.sort((a, b) => {
           const fa = FOODISH.test(a) ? 1 : 0;
           const fb = FOODISH.test(b) ? 1 : 0;
-          if (fa !== fb) return fb - fa;
+          if (fa !== fb) return fb - fa;             // prefer food-ish lines
           return score(b) - score(a) || b.length - a.length;
         });
 
-        candidates = uniq;
-        dbg('[OCR] vision backstop merged top:', candidates.slice(0, 5));
-      }
-    } else {
-      dbg('[OCR] vision backstop returned empty text');
+        if (process.env.NODE_ENV !== 'production') {
+          dbg('[OCR] candidates(before guards)', candidates.slice(0, 8));
+        }
+
+        // 3) (Optional but effective) Merge "Organic" + food line from the top few
+        const merged = maybeMergeFoodPair(candidates.slice(0, 5));
+        if (merged) {
+          // Put merged at the front, then stable-dedupe and re-rank
+          candidates.unshift(merged);
+
+          // stable-dedupe again
+          const seen2 = new Set<string>();
+          candidates = candidates.filter((x) => (seen2.has(x) ? false : (seen2.add(x), true)));
+
+          // re-rank using your scorer
+          candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+
+          if (process.env.NODE_ENV !== 'production') {
+            dbg('[OCR] after merge', candidates.slice(0, 5));
+          }
+        }
+
+        // ---- Label-band guard: try a couple of short, focused band reads if top looks brand-only ----
+        // In FAST_MODE (production), skip this extra work to avoid timeouts.
+        if (!FAST_MODE && candidates.length) {
+          const FOODISH = /\b(beans?|pasta|rice|sauce|tomato|lentils?|soup|chickpeas?|corn|peas|broth|noodles?|olive|oil|tuna|salmon|apple|peach|peanut|butter)\b/i;
+          const brandNorm = brandText ? postClean(brandText).toLowerCase() : '';
+          const topNorm   = postClean(candidates[0]).toLowerCase();
+          const topLooksBrandOnly =
+            brandNorm &&
+            (topNorm === brandNorm || topNorm.startsWith(brandNorm + ' ')) &&
+            !FOODISH.test(candidates[0]);
+
+          if (topLooksBrandOnly && generalInput?.length && Buffer.isBuffer(generalInput[0])) {
+            try {
+              // 2 quick crops: mid band and lower band
+              const base = await downscaleIfNeeded(generalInput[0] as Buffer, 1100); // a tad larger than 900
+              const mid  = await cropBandPct(base, 0.35, 0.72);   // middle of label
+              const low  = await cropBandPct(base, 0.60, 0.92);   // lower band (often the food name)
+
+              // Try raw + binarized for each band (each attempt is short)
+              const attempts: Buffer[] = [];
+              attempts.push(mid, await binarizeWhiteOnColor(mid));
+              attempts.push(low, await binarizeWhiteOnColor(low));
+
+              for (const [k, img] of attempts.entries()) {
+                // pass 1: normal
+                const txt = await tryRecognize(
+                  worker,
+                  img,
+                  {
+                    tessedit_pageseg_mode: k % 2 === 0 ? '7' : '11',   // 7: single-line, 11: sparse
+                    preserve_interword_spaces: '1',
+                    user_defined_dpi: '300',
+                    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
+                  },
+                  `recognize:labelband:${k}`,
+                  STEP_MS_SIZE_FAST
+                );
+
+                // pass 2: inverted (helps white-on-red/white-on-dark banners)
+                const txtInv = await tryRecognize(
+                  worker,
+                  img,
+                  {
+                    tessedit_pageseg_mode: '7',
+                    preserve_interword_spaces: '1',
+                    tessedit_do_invert: '1',
+                    user_defined_dpi: '300',
+                    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
+                  },
+                  `recognize:labelband:invert:${k}`,
+                  STEP_MS_SIZE_FAST
+                );
+
+                // handle a result (shared helper)
+                const handle = (raw: string | null) => {
+                  if (!raw) return false;
+                  const best = extractBestLine(raw) || postClean(clean(raw));
+                  if (!best) return false;
+
+                  candidates.push(best);
+
+                  // stable-dedupe + re-rank
+                  const seenLB = new Set<string>();
+                  candidates = candidates.filter(x => (seenLB.has(x) ? false : (seenLB.add(x), true)));
+                  candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+
+                  // stop early if we now have a food-ish top line
+                  return FOODISH.test(candidates[0]);
+                };
+
+                if (handle(txt)) break;
+                if (handle(txtInv)) break;
+              }
+            } catch {
+              /* best effort */
+            }
+          }
+        }
+
+        // If top line is just the brand, try a cheap extra sparse read to pull food words.
+        if (brandText && candidates.length) {
+          const brandNorm = postClean(brandText).toLowerCase();
+          const topNorm   = postClean(candidates[0]).toLowerCase();
+          const topIsBrand = topNorm === brandNorm || topNorm.startsWith(brandNorm + ' ');
+
+          const src0: Buffer | string | undefined = generalInput?.[0]; // may be Buffer OR string path
+          if (topIsBrand && src0) {
+            try {
+              // If we have a Buffer, lightly downscale; if it's a path, pass it through directly.
+              const img: Buffer | string = Buffer.isBuffer(src0)
+                ? await downscaleIfNeeded(src0 as Buffer, 900)
+                : (src0 as string);
+
+              const extra = await tryRecognize(
+                worker,
+                img,
+                {
+                  tessedit_pageseg_mode: '11',            // sparse
+                  preserve_interword_spaces: '1',
+                  user_defined_dpi: '300',
+                  tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
+                },
+                'recognize:general:guard-psm11',
+                STEP_MS_SIZE_FAST                         // keep it short
+              );
+
+              if (extra) {
+                // Prefer the best food-ish line from the blob, fall back to cleaned whole text.
+                const best = extractBestLine(extra) || postClean(clean(extra));
+                if (best) {
+                  candidates.push(best);
+
+                  // stable-dedupe + re-rank
+                  const seenX = new Set<string>();
+                  candidates = candidates.filter(x => (seenX.has(x) ? false : (seenX.add(x), true)));
+                  candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+                }
+              }
+            } catch {
+              /* best effort; ignore */
+            }
+          }
+          if (process.env.NODE_ENV !== 'production') {
+            dbg('[OCR] after band-guard', candidates.slice(0, 5));
+          }
+          // end of band-guard block
+        }
+
+        // If we recognized a brand, gently demote a pure-brand line below food-ish lines.
+        if (brandText && candidates.length > 1) {
+          const brandNorm = postClean(brandText).toLowerCase();
+
+          // words that indicate the *food* (tune as you like)
+          const FOODISH = /\b(beans?|pasta|rice|sauce|tomato|lentils?|soup|chickpeas?|corn|peas|broth|noodles?|olive|oil|tuna|salmon|apple|peach|peanut|butter)\b/i;
+
+          function isBrandOnly(s: string) {
+            const n = postClean(s).toLowerCase();
+            // treat "trader joe's", "trader joe's organic" etc. as brand-only
+            const starts = n.startsWith(brandNorm);
+            const hasFood = FOODISH.test(s);
+            return starts && !hasFood && n.replace(brandNorm, '').trim().length <= 10; // short tail like "organic"
+          }
+
+          // Stable re-order: keep food-ish lines above a brand-only line
+          candidates.sort((a, b) => {
+            const aBrandOnly = isBrandOnly(a);
+            const bBrandOnly = isBrandOnly(b);
+            if (aBrandOnly && !bBrandOnly) return 1;   // push brand-only down
+            if (!aBrandOnly && bBrandOnly) return -1;  // keep food up
+            // otherwise keep your existing ranking
+            return score(b) - score(a) || b.length - a.length;
+          });
+
+          if (process.env.NODE_ENV !== 'production') {
+            dbg('[OCR] after brand-demote', candidates.slice(0, 5));
+          }
+        }
+
+        // (debug) inputs to the band-guard
+        if (process.env.NODE_ENV !== 'production') {
+          dbg('[OCR] guard inputs', {
+            top: candidates[0],
+            brandText,
+            hasGeneralInput: !!(generalInput?.length),
+          });
+        }
+
+        // Backstop: if top is still just the brand, try one sparse read on the full oriented image.
+        if (brandText && candidates.length) {
+          const brandNorm = postClean(brandText).toLowerCase();
+          const topNorm   = postClean(candidates[0]).toLowerCase();
+          const topIsBrand = topNorm === brandNorm || topNorm.startsWith(brandNorm + ' ');
+
+          if (topIsBrand && orientedFull) {
+            try {
+              const extra2 = await tryRecognize(
+                worker,
+                orientedFull,                             // full image Buffer
+                {
+                  tessedit_pageseg_mode: '11',
+                  preserve_interword_spaces: '1',
+                  user_defined_dpi: '300',
+                  tessedit_char_whitelist:
+                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' -",
+                },
+                'recognize:general:guard-psm11-full',
+                STEP_MS_SIZE_SLOW                         // a touch looser than FAST; still bounded
+              );
+
+              const best2 = extra2 ? extractBestLine(extra2) : '';
+              if (best2) {
+                candidates.push(best2);
+                const seenY = new Set<string>();
+                candidates = candidates.filter(x => (seenY.has(x) ? false : (seenY.add(x), true)));
+                candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+              }
+            } catch { /* best effort */ }
+          }
+        }
+
+        // If we recognized a brand, gently demote a pure-brand line below food-ish lines.
+        if (brandText && candidates.length) {
+          const brandNorm = postClean(brandText).toLowerCase();
+          candidates.sort((a, b) => {
+            const an = a.toLowerCase();
+            const bn = b.toLowerCase();
+            const aIsBrand = an === brandNorm || an.startsWith(brandNorm + ' ');
+            const bIsBrand = bn === brandNorm || bn.startsWith(brandNorm + ' ');
+            if (aIsBrand && !bIsBrand) return 1;   // push brand down
+            if (!aIsBrand && bIsBrand) return -1;  // keep food up
+            return 0;
+          });
+        }
+
+        // (Optional) when both brand & name present, drop the brand once from the top line
+        if (brandText && candidates.length) {
+          candidates[0] = postClean(stripBrandOnce(candidates[0], brandText));
+        }
+
+        // After your existing candidates.sort(...) that ranks best-first:
+        candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+
+        // >>> POLISH + re-dedupe + re-rank <<<
+        candidates = candidates.map(polishFoodLine);
+
+        // stable-dedupe again after polish (polish can make two lines equal)
+        {
+          const seen = new Set<string>();
+          candidates = candidates.filter(x => (seen.has(x) ? false : (seen.add(x), true)));
+        }
+
+        // Prefer FOODISH lines first (you already have a sorter; reuse or inline)
+        candidates.sort((a, b) => {
+          const fa = FOODISH.test(a) ? 1 : 0;
+          const fb = FOODISH.test(b) ? 1 : 0;
+          if (fa !== fb) return fb - fa;               // food-ish above non-food
+          return score(b) - score(a) || b.length - a.length;
+        });
+
+        // (Optional) tiny guard: if top is brand-only and #2 is food-ish, swap
+        if (candidates.length > 1) {
+          const topIsFood = FOODISH.test(candidates[0]);
+          const secondIsFood = FOODISH.test(candidates[1]);
+          if (!topIsFood && secondIsFood) {
+            [candidates[0], candidates[1]] = [candidates[1], candidates[0]];
+            if (process.env.NODE_ENV !== 'production') {
+              dbg('[OCR] nudged top two (prefer food-ish):', candidates.slice(0, 3));
+            }
+          }
+        }
+
+        // If the top line is clearly a food name, prune non-food (brand-only) lines below it.
+        if (candidates.length > 1 && FOODISH.test(candidates[0])) {
+          // Keep the top; drop any non-FOODISH lines that follow (brands, slogans, etc.)
+          candidates = [candidates[0], ...candidates.slice(1).filter(s => FOODISH.test(s))];
+
+          // (Optional) If you want to be slightly stricter about known brand words:
+          // const BRANDISH = /\b(trader\s+joe'?s?|kirkland|whole\s+foods|barilla|goya|heinz|campbell'?s)\b/i;
+          // candidates = [candidates[0], ...candidates.slice(1).filter(s => FOODISH.test(s) && !BRANDISH.test(s))];
+        }
+
+        // If top is food-ish, drop any pure brand-only tails from the remainder
+        if (candidates.length) {
+          const topIsFood = FOODISH.test(candidates[0]);
+          if (topIsFood && brandText) {
+            const brandNorm = postClean(brandText).toLowerCase();
+            candidates = candidates.filter((s, i) => {
+              if (i === 0) return true;
+              const n = postClean(s).toLowerCase();
+              const isBrandOnly = n === brandNorm || n.startsWith(brandNorm + ' ');
+              return !isBrandOnly;
+            });
+          }
+        }
+
+        dbg('[OCR] trace', {
+          generalTop5: generalTextTop5,   // <-- use the variable you actually have
+          brandText,
+          candidatesTop5: candidates.slice(0, 5),
+        });
+
+        // --- Google Vision backstop (only if our picks look weak) ---
+        if (!FAST_MODE) {
+          try {
+            const MIN_LEN   = Number(process.env.OCR_VISION_TRIGGER_MINLEN  ?? 10);
+            const MIN_SCORE = Number(process.env.OCR_VISION_TRIGGER_MINSCORE ?? 180);
+
+            const top = candidates[0] ?? '';
+
+            // Trigger Vision if:
+            // - Tesseract found nothing, OR
+            // - the top line doesn't look like food AND (it's very short OR low score)
+            const looksWeak =
+              candidates.length === 0 ||
+              (!FOODISH.test(top) &&
+                (
+                  top.replace(/[^A-Za-z]/g, '').length < MIN_LEN ||
+                  score(top) < MIN_SCORE
+                )
+              );
+
+            dbg('[OCR] trigger check', {
+              top,
+              len: top.replace(/[^A-Za-z]/g, '').length,
+              score: score(top),
+              MIN_LEN, MIN_SCORE,
+              looksWeak,
+            });
+
+            // Prefer the main input buffer
+            const src: Buffer | undefined = generalInput?.[0] as Buffer | undefined;
+
+            if (looksWeak && src && Buffer.isBuffer(src)) {
+              // --- timing start ---
+              const t0 = nowMs && typeof nowMs === 'function' ? nowMs() : Date.now();
+
+              const vt = await detectTextFromBuffer(src);
+
+              const elapsed = Math.round(
+                (nowMs && typeof nowMs === 'function' ? nowMs() : Date.now()) - t0
+              );
+              dbg('[OCR] vision.fallback.ms', elapsed);
+              // --- timing end ---
+
+              if (vt) {
+                // Normalize Vision text the same way as Tesseract lines
+                const visCands = vt
+                  .split(/\r?\n+/)
+                  .map((s) => postClean(clean(denoiseLine(s))))
+                  .map((s) => polishFoodLine(s))
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+
+                if (visCands.length) {
+                  // Merge → stable-dedupe (Vision first so a good food line can bubble up)
+                  const merged = [...visCands, ...candidates];
+                  const uniq: string[] = [];
+                  const seen = new Set<string>();
+                  for (const s of merged) if (!seen.has(s)) { seen.add(s); uniq.push(s); }
+
+                  // Prefer food-ish, then your score, then length
+                  uniq.sort((a, b) => {
+                    const fa = FOODISH.test(a) ? 1 : 0;
+                    const fb = FOODISH.test(b) ? 1 : 0;
+                    if (fa !== fb) return fb - fa;
+                    return score(b) - score(a) || b.length - a.length;
+                  });
+
+                  candidates = uniq;
+                  dbg('[OCR] vision backstop merged top:', candidates.slice(0, 5));
+                }
+              } else {
+                dbg('[OCR] vision backstop returned empty text');
+              }
+            }
+          } catch (e) {
+            dbg('[OCR] vision backstop error:', (e as Error)?.message ?? e);
+          }
+        }
+
+        // Return a newline-joined blob (top line first)
+        let finalText = candidates.join('\n');
+
+        // Fallback: if ranking ended up empty, show the first general line (cleaned)
+        if (!finalText && (generalTextTop5?.length ?? 0) > 0) {
+          finalText = postClean(clean(generalTextTop5[0]));
+          if (process.env.NODE_ENV !== 'production') {
+            dbg('[OCR] fallback → first general line:', finalText);
+          }
+        }
+
+        // --- FINAL nudge: if #1 looks like a pure brand but #2 looks like food, prefer food ---
+        if (candidates.length > 1) {
+          const topIsFood    = FOODISH.test(candidates[0]);
+          const secondIsFood = FOODISH.test(candidates[1]);
+          if (!topIsFood && secondIsFood) {
+            [candidates[0], candidates[1]] = [candidates[1], candidates[0]];
+            if (process.env.NODE_ENV !== 'production') {
+              dbg('[OCR] nudged top two (prefer food-ish):', candidates.slice(0, 3));
+            }
+          }
+        }
+
+        if (process.env.NODE_ENV !== 'production') {
+          dbg('[OCR] final candidates (top→):', candidates.slice(0, 5));
+        }
+
+        mark('finalText built');
+
+        return finalText;
+      });
     }
-  }
-} catch (e) {
-  dbg('[OCR] vision backstop error:', (e as Error)?.message ?? e);
-}
-}   
 
-// Return a newline-joined blob (top line first)
-let finalText = candidates.join('\n');
+    mark('about to return response');
 
-// Fallback: if ranking ended up empty, show the first general line (cleaned)
-if (!finalText && (generalTextTop5?.length ?? 0) > 0) {
-  finalText = postClean(clean(generalTextTop5[0]));
-  if (process.env.NODE_ENV !== 'production') {
-    dbg('[OCR] fallback → first general line:', finalText);
-  }
-}
-
-// --- FINAL nudge: if #1 looks like a pure brand but #2 looks like food, prefer food ---
-if (candidates.length > 1) {
-  const topIsFood    = FOODISH.test(candidates[0]);
-  const secondIsFood = FOODISH.test(candidates[1]);
-  if (!topIsFood && secondIsFood) {
-    [candidates[0], candidates[1]] = [candidates[1], candidates[0]];
-    if (process.env.NODE_ENV !== 'production') {
-      dbg('[OCR] nudged top two (prefer food-ish):', candidates.slice(0, 3));
-    }
-  }
-}
-
-if (process.env.NODE_ENV !== 'production') {
-  dbg('[OCR] final candidates (top→):', candidates.slice(0, 5));
-}
-
-mark('finalText built');
-
-return finalText;
-    });
-
-mark('about to return response');
-
-return NextResponse.json({ ok: true, text });
+    return NextResponse.json({ ok: true, text });
   } catch (e) {
     console.error('[OCR] route error:', e);
 
