@@ -389,13 +389,21 @@ async function getWorker(req: NextRequest): Promise<TWorker> {
     throw new Error(`langPath for FS must end with "${path.sep}". Got: ${langPath}`);
   }
 
+// Build Tesseract options without passing undefined paths
 const baseOpts: any = {
-  workerPath: TESS_OPTS_BASE.workerPath,
-  corePath:   TESS_OPTS_BASE.corePath,
-  langPath,                                      // normalized with trailing slash
-  cachePath:  TESS_OPTS_BASE.cachePath,
-  ...(typeof gzip === 'boolean' ? { gzip } : {}),// only set if we actually know true/false
+  langPath,                            // normalized with trailing slash
+  cachePath: TESS_OPTS_BASE.cachePath,
+  ...(typeof gzip === 'boolean' ? { gzip } : {}), // only set if we actually know true/false
 };
+
+// Only include worker/core paths if they’re actually defined.
+// On Vercel these may be undefined, and that would break new Worker(...)
+if (TESS_OPTS_BASE.workerPath) {
+  baseOpts.workerPath = TESS_OPTS_BASE.workerPath;
+}
+if (TESS_OPTS_BASE.corePath) {
+  baseOpts.corePath = TESS_OPTS_BASE.corePath;
+}
 
 dbg('[OCR] createWorker opts =', baseOpts);
 
@@ -1687,15 +1695,18 @@ if (process.env.NODE_ENV !== 'production') {
 return finalText;
     });
 
-    return NextResponse.json({ ok: true, text });
+        return NextResponse.json({ ok: true, text });
   } catch (e) {
-    console.error('OCR error:', e);
+    console.error('[OCR] route error:', e);
+
     const msg = (e as Error)?.message || String(e);
     const status = msg === 'ocr-timeout' ? 504 : 500;
+
     return NextResponse.json(
       {
         ok: false,
-        error: 'OCR failed',
+        // In dev, surface the real message; in prod, keep a generic one
+        error: process.env.NODE_ENV === 'production' ? 'OCR failed' : msg,
         devError: process.env.NODE_ENV !== 'production' ? msg : undefined,
       },
       { status },
