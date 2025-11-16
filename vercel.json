@@ -1,12 +1,7 @@
 {
   "functions": {
     "app/api/ocr/route.ts": {
-      "includeFiles": [
-        "node_modules/tesseract.js-core/tesseract-core.wasm",
-        "node_modules/tesseract.js-core/tesseract-core-simd.wasm",
-        "node_modules/tesseract.js/node_modules/tesseract.js-core/tesseract-core.wasm",
-        "node_modules/tesseract.js/node_modules/tesseract.js-core/tesseract-core-simd.wasm"
-      ]
+      "includeFiles": "node_modules/**/tesseract-core*.wasm"
     }
   }
 }
