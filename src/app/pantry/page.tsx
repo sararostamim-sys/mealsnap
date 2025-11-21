@@ -362,7 +362,12 @@ await upsertPantryItem({
         {loading ? (
           <p className="text-gray-600 dark:text-gray-400">Loading…</p>
         ) : (
-          <div className="overflow-x-auto">
+          <div
+            className={
+             'overflow-x-auto ' +
+             (tab === 'barcode' ? 'max-h-[60vh] overflow-y-auto' : '')
+             }
+            >
             <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
               <colgroup>
                 <col className="w-[56%]" /> 
