@@ -278,7 +278,7 @@ async function runVisionFastPath(fileBuf: Buffer): Promise<string> {
 
   // 2) Filter out junk: very short, non-wordy, size / boilerplate lines
   const seenRaw = new Set<string>();
-  let candidates = lines
+  const candidates = lines
     .filter((s) => {
       if (s.length < 3) return false;                 // drop 'R'
       if (!looksLikeWordy(s)) return false;          // drop things like "350a" if your helper says so
@@ -288,14 +288,6 @@ async function runVisionFastPath(fileBuf: Buffer): Promise<string> {
       seenRaw.add(s);
       return true;
     });
-
-  // 3) Try to merge "Organic" + "Kidney Beans" style pairs
-  const merged = maybeMergeFoodPair(candidates.slice(0, 5));
-  if (merged) {
-    candidates.unshift(merged);
-    const seen2 = new Set<string>();
-    candidates = candidates.filter((x) => (seen2.has(x) ? false : (seen2.add(x), true)));
-  }
 
   // 4) Rank: prefer food-ish lines, then by score/length
   candidates.sort((a, b) => {
