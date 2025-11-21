@@ -297,6 +297,27 @@ async function runVisionFastPath(fileBuf: Buffer): Promise<string> {
     return score(b) - score(a) || b.length - a.length;
   });
 
+  // 4b) If the top line is missing a strong "tail" food word but a later
+// candidate has one (common for multi-line labels), merge that tail onto
+// the top line. This is Vision-only and does *not* touch Tesseract paths.
+if (candidates.length > 1) {
+  const top0 = candidates[0];
+
+  // Tail-ish words that often appear on the second line of the label.
+  // Generic: covers pasta, noodles, soups, beans, stews, etc.
+  const TAILISH =
+    /\b(pasta|fusilli|penne|spaghetti|noodles?|linguine|fettuccine|orzo|ramen|udon|soba|soup|stew|chili|beans?)\b/i;
+
+  // Only try to fix if the current top line does *not* already have a tail word.
+  if (!TAILISH.test(top0)) {
+    const tail = candidates.find((s, i) => i > 0 && TAILISH.test(s));
+    if (tail) {
+      // Merge: e.g. "Brown Rice" + "Fusilli Pasta" → "Brown Rice Fusilli Pasta"
+      candidates[0] = postClean(`${top0} ${tail}`);
+    }
+  }
+}
+
   dbg('[OCR] vision fast candidates:', candidates.slice(0, 5));
 
   // 5) Pick a single best line
