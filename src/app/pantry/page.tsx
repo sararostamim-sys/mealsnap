@@ -41,6 +41,14 @@ const UNIT_OPTIONS = [
   'tsp',
 ] as const;
 
+/** Resolve current user id (shared helper) */
+async function resolveUserId(): Promise<string> {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  return user?.id ?? getDevUserId();
+}
+
 export default function PantryPage() {
   useRequireAuth();
 
@@ -61,12 +69,6 @@ export default function PantryPage() {
   });
   const isEditing = (id: string) => editingId === id;
 
-  /** Resolve current user id */
-  async function resolveUserId(): Promise<string> {
-    const { data: { user } } = await supabase.auth.getUser();
-    return user?.id ?? getDevUserId();
-  }
-
   const load = useCallback(async () => {
   setLoading(true);
   const userId = await resolveUserId();
@@ -85,70 +87,82 @@ export default function PantryPage() {
   void load();
 }, [load]);
 
-  // Add-or-merge helper: if a matching row exists (same normalized name + unit),
-  // increment qty; otherwise insert a new row.
-  const upsertPantryItem = useCallback(
-    async (input: {
-      name: string;
-      qty?: number;
-      unit?: string;
-      perish_by?: string | null;
-    }) => {
-      const userId = await resolveUserId();
-      const nameTrim = input.name.trim();
-      if (!nameTrim) return;
+ // Add-or-merge helper: if a matching row exists (same normalized name + unit),
+// increment qty; otherwise insert a new row.
+const upsertPantryItem = useCallback(
+  async (input: {
+    name: string;
+    qty?: number;
+    unit?: string;
+    perish_by?: string | null;
+  }) => {
+    const userId = await resolveUserId();
+    const nameTrim = input.name.trim();
+    if (!nameTrim) return;
 
-      const qty = Number(input.qty ?? 1) || 1;
-      const unit = input.unit ?? 'unit';
-      const perish_by = input.perish_by ?? null;
+    const qty = Number(input.qty ?? 1) || 1;
+    const unit = input.unit ?? 'unit';
+    const perish_by = input.perish_by ?? null;
 
-      const key = normalizeNameForKey(nameTrim);
+    const key = normalizeNameForKey(nameTrim);
 
-      // Look for an existing row in current state that matches this key + unit
-      const existing = items.find(
-        (i) => normalizeNameForKey(i.name) === key && i.unit === unit
-      );
+    // Fetch possible matches for this user+unit, then match by normalized name in JS.
+    const { data, error: selErr } = await supabase
+      .from('pantry_items')
+      .select('id,name,qty,unit')
+      .eq('user_id', userId)
+      .eq('unit', unit);
 
-      if (existing) {
-        const newQty = existing.qty + qty;
+    if (selErr) {
+      console.error(selErr);
+      alert('Failed to read existing items.');
+      return;
+    }
 
-        const { error } = await supabase
-          .from('pantry_items')
-          .update({ qty: newQty })
-          .eq('id', existing.id)
-          .eq('user_id', userId);
+    const existing = (data ?? []).find(
+      (row) => normalizeNameForKey(row.name) === key
+    );
 
-        if (error) {
-          console.error(error);
-          alert('Failed to update existing item.');
-          return;
-        }
+    if (existing) {
+      const newQty = (existing.qty ?? 0) + qty;
 
-        // Optimistic local update
-        setItems((prev) =>
-          prev.map((i) => (i.id === existing.id ? { ...i, qty: newQty } : i))
-        );
-      } else {
-        const payload = {
-          user_id: userId,
-          name: nameTrim.toLowerCase(),
-          qty,
-          unit,
-          perish_by,
-        };
+      const { error } = await supabase
+        .from('pantry_items')
+        .update({ qty: newQty })
+        .eq('id', existing.id)
+        .eq('user_id', userId);
 
-        const { error } = await supabase.from('pantry_items').insert(payload);
-        if (error) {
-          console.error(error);
-          alert('Failed to add item.');
-          return;
-        }
-
-        // We'll let the caller decide when to call load() to refresh from DB.
+      if (error) {
+        console.error(error);
+        alert('Failed to update existing item.');
+        return;
       }
-    },
-    [items]
-  );
+
+      // Optimistic local update
+      setItems((prev) =>
+        prev.map((i) => (i.id === existing.id ? { ...i, qty: newQty } : i))
+      );
+    } else {
+      const payload = {
+        user_id: userId,
+        name: nameTrim.toLowerCase(),
+        qty,
+        unit,
+        perish_by,
+      };
+
+      const { error } = await supabase.from('pantry_items').insert(payload);
+      if (error) {
+        console.error(error);
+        alert('Failed to add item.');
+        return;
+      }
+
+      // We'll let the caller decide when to call load() to refresh from DB.
+    }
+  },
+  [] // <-- IMPORTANT: no `items` here
+);
 
     async function add() {
     if (!form.name.trim()) return;
