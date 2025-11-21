@@ -20,6 +20,32 @@ function normalizeNameForKey(name: string): string {
     .trim();
 }
 
+// Tiny heuristic categorization for visual grouping only
+function categorizeName(name: string): string {
+  const n = name.toLowerCase();
+
+  if (/\b(rice|quinoa|farro|barley|bulgur|oats?|couscous)\b/.test(n)) {
+    return 'Grains';
+  }
+  if (/\b(pasta|fusilli|penne|spaghetti|noodles?|macaroni|lasagna)\b/.test(n)) {
+    return 'Pasta';
+  }
+  if (/\b(beans?|lentils?|chickpeas?|garbanzo|black bean|kidney bean|pinto)\b/.test(n)) {
+    return 'Beans & Legumes';
+  }
+  if (/\b(tomato|marinara|pasta sauce|salsa|broth|stock|soup)\b/.test(n)) {
+    return 'Sauces & Canned';
+  }
+  if (/\b(oil|olive oil|canola oil|avocado oil|vegetable oil)\b/.test(n)) {
+    return 'Oils';
+  }
+  if (/\b(flour|sugar|salt|spice|spices|seasoning)\b/.test(n)) {
+    return 'Baking & Spices';
+  }
+
+  return 'Other';
+}
+
 type PantryItem = {
   id: string;
   name: string;
@@ -397,20 +423,24 @@ for (const r of rows) {
                   return (
                     <tr key={i.id} className="border-t border-gray-200 dark:border-gray-800 align-top">
                       {/* Item */}
-                      <td className="p-2">
-                        {editing ? (
-                          <input
-                           className="border rounded px-2 py-1 w-full"
-                           value={draft.name}
-                           onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                          onKeyDown={onDraftKeyDown}
-                           // Keep the “nice” auto-focus for non-barcode tabs only
-                       autoFocus={tab !== 'barcode'}
-                       />
-                      ) : (
-                    <div className="truncate">{i.name}</div>
-                     )}
-                      </td>
+                    <td className="p-2">
+                    {editing ? (
+                   <input
+                   className="border rounded px-2 py-1 w-full"
+                   value={draft.name}
+                   onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+                   onKeyDown={onDraftKeyDown}
+                  autoFocus
+                 />
+                 ) : (
+    <div>
+      <div className="truncate">{i.name}</div>
+      <div className="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
+        {categorizeName(i.name)}
+      </div>
+    </div>
+  )}
+</td>
 
                       {/* Qty */}
                       <td className="p-2">
