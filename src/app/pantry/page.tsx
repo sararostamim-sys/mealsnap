@@ -7,6 +7,7 @@ import { getDevUserId } from '@/lib/user';
 
 import BarcodeScanner from '@/components/BarcodeScanner';
 import { ocrDetectSingle, upcLookup, type DetectedItem } from '@/lib/helpers';
+import { properCaseName } from '@/lib/normalize';
 
 // Normalize a pantry item name for duplicate detection
 function normalizeNameForKey(name: string): string {
@@ -306,14 +307,17 @@ export default function PantryPage() {
               if (!rows.length) return;
 
               // Sequentially upsert each detected row
-              for (const r of rows) {
-                await upsertPantryItem({
-                  name: r.name,
-                  qty: r.qty ?? 1,
-                  unit: r.unit ?? 'unit',
-                  perish_by: null,
-                });
-              }
+for (const r of rows) {
+  const rawName = r.name ?? '';
+  const niceName = properCaseName(rawName);
+
+  await upsertPantryItem({
+    name: niceName,
+    qty: r.qty ?? 1,
+    unit: r.unit ?? 'unit',
+    perish_by: null,
+  });
+}
 
               await load();
             }}
@@ -324,12 +328,15 @@ export default function PantryPage() {
         {tab === 'barcode' && (
           <BarcodeCapture
             onCommit={async (item) => {
-              await upsertPantryItem({
-                name: item.name,
-                qty: item.qty ?? 1,
-                unit: item.unit ?? 'unit',
-                perish_by: null,
-              });
+              const rawName = item.name ?? '';
+const niceName = properCaseName(rawName);
+
+await upsertPantryItem({
+  name: niceName,
+  qty: item.qty ?? 1,
+  unit: item.unit ?? 'unit',
+  perish_by: null,
+});
               await load();
             }}
           />
