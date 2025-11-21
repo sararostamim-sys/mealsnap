@@ -629,20 +629,30 @@ function BarcodeCapture({ onCommit }: { onCommit: (item: { name: string; qty?: n
   return (
     <div className="space-y-3 mb-4">
       <BarcodeScanner
-        onDetected={async (code: string) => {
-          if (pending) return;
-          setPending(true);
-          try {
-            const item = await upcLookup(code);
-            setLast(item);
-          } catch (e) {
-            console.error(e);
-            alert(`UPC lookup failed: ${String(e)}`);
-          } finally {
-            setPending(false);
-          }
-        }}
-      />
+  onDetected={async (code: string) => {
+    if (pending) return;
+    setPending(true);
+    try {
+      const item = await upcLookup(code);
+      const rawName = item?.name ?? '';
+
+      // Use the same idea as normalizeNameForKey: strip brand / "organic" noise,
+      // then pretty-case it for display.
+      const base = normalizeNameForKey(rawName); // returns lowercased, noise-stripped
+      const cleanedName = base ? properCaseName(base) : rawName;
+
+      setLast({
+        ...item,
+        name: cleanedName,
+      });
+    } catch (e) {
+      console.error(e);
+      alert(`UPC lookup failed: ${String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  }}
+/>
       {last && (
         <div className="rounded border border-gray-200 dark:border-gray-800 p-3">
           <div className="text-sm text-gray-600 dark:text-gray-400 mb-2">Detected:</div>
