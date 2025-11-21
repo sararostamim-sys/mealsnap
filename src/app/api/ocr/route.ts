@@ -1415,22 +1415,91 @@ export async function POST(req: NextRequest) {
         }
 
         // 3) (Optional but effective) Merge "Organic" + food line from the top few
-        const merged = maybeMergeFoodPair(candidates.slice(0, 5));
-        if (merged) {
-          // Put merged at the front, then stable-dedupe and re-rank
-          candidates.unshift(merged);
+const merged = maybeMergeFoodPair(candidates.slice(0, 5));
+if (merged) {
+  // Put merged at the front, then stable-dedupe and re-rank
+  candidates.unshift(merged);
 
-          // stable-dedupe again
-          const seen2 = new Set<string>();
-          candidates = candidates.filter((x) => (seen2.has(x) ? false : (seen2.add(x), true)));
+  // stable-dedupe again
+  const seen2 = new Set<string>();
+  candidates = candidates.filter((x) =>
+    seen2.has(x) ? false : (seen2.add(x), true),
+  );
 
-          // re-rank using your scorer
-          candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+  // re-rank using your scorer
+  candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
 
-          if (process.env.NODE_ENV !== 'production') {
-            dbg('[OCR] after merge', candidates.slice(0, 5));
-          }
-        }
+  if (process.env.NODE_ENV !== 'production') {
+    dbg('[OCR] after merge', candidates.slice(0, 5));
+  }
+}
+
+// 3b) Generic "base + short food tail" merge.
+// Example patterns it can handle:
+//   - "Organic Brown Rice & Quinoa" + "Fusilli Pasta"
+//   - "Tomato Basil" + "Soup"
+//   - "Black" + "Beans" (if they land on separate lines)
+{
+  const topFew = candidates.slice(0, 5);
+
+  let baseLine: string | null = null;
+  let tailLine: string | null = null;
+  let mergedCombo: string | null = null;
+
+  // Words that usually indicate branding / modifiers, not the tail food type.
+  const BRANDISH = /\b(trader|joe'?s|kirkland|signature|brand|company|organic)\b/i;
+
+  outer: for (let i = 0; i < topFew.length; i++) {
+    for (let j = 0; j < topFew.length; j++) {
+      if (i === j) continue;
+      const a = topFew[i];
+      const b = topFew[j];
+      if (!a || !b) continue;
+
+      const aFood = FOODISH.test(a);
+      const bFood = FOODISH.test(b);
+      if (!aFood || !bFood) continue;
+
+      // Pick base = longer, tail = shorter
+      const base = a.length >= b.length ? a : b;
+      const tail = a.length >= b.length ? b : a;
+
+      const tailWords = tail.trim().split(/\s+/);
+      if (tailWords.length === 0 || tailWords.length > 3) continue;
+
+      // Skip tails that are clearly branding-ish
+      if (BRANDISH.test(tail)) continue;
+
+      // Skip if tail is already contained in base
+      if (base.toLowerCase().includes(tail.toLowerCase())) continue;
+
+      const combo = postClean(`${base} ${tail}`);
+      if (!combo) continue;
+
+      baseLine = base;
+      tailLine = tail;
+      mergedCombo = combo;
+      break outer;
+    }
+  }
+
+  if (mergedCombo && baseLine && tailLine) {
+    const toDrop = new Set<string>([baseLine, tailLine]);
+    const rest = candidates.filter((s) => !toDrop.has(s));
+
+    const seen3 = new Set<string>();
+    candidates = [mergedCombo, ...rest].filter((s) =>
+      seen3.has(s) ? false : (seen3.add(s), true),
+    );
+
+    candidates.sort((a, b) => score(b) - score(a) || b.length - a.length);
+
+    if (process.env.NODE_ENV !== 'production') {
+      dbg('[OCR] after generic tail-merge', candidates.slice(0, 5));
+    }
+  }
+}
+         
 
         // ---- Label-band guard: try a couple of short, focused band reads if top looks brand-only ----
         // In FAST_MODE (production), skip this extra work to avoid timeouts.
