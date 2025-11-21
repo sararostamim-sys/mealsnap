@@ -1,6 +1,6 @@
 // src/app/pantry/page.tsx
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import { getDevUserId } from '@/lib/user';
@@ -60,6 +60,22 @@ export default function PantryPage() {
     perish_by: '',
   });
   const isEditing = (id: string) => editingId === id;
+
+    // Ref for the inline name input so we can focus it without scrolling
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+  const el = nameInputRef.current;
+  if (editingId && el) {
+    try {
+      // Modern browsers: focus without scrolling the page
+      el.focus({ preventScroll: true } as FocusOptions);
+    } catch {
+      // Fallback for older browsers / environments
+      el.focus();
+    }
+  }
+}, [editingId]);
 
   /** Resolve current user id */
   async function resolveUserId(): Promise<string> {
@@ -374,16 +390,16 @@ await upsertPantryItem({
                       {/* Item */}
                       <td className="p-2">
                         {editing ? (
-                          <input
-                            className="border rounded px-2 py-1 w-full"
-                            value={draft.name}
-                            onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
-                            onKeyDown={onDraftKeyDown}
-                            autoFocus
-                          />
-                        ) : (
-                          <div className="truncate">{i.name}</div>
-                        )}
+  <input
+    ref={nameInputRef}
+    className="border rounded px-2 py-1 w-full"
+    value={draft.name}
+    onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
+    onKeyDown={onDraftKeyDown}
+  />
+) : (
+  <div className="truncate">{i.name}</div>
+)}
                       </td>
 
                       {/* Qty */}
