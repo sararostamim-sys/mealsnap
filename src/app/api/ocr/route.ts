@@ -1435,7 +1435,7 @@ if (merged) {
 //   - "Tomato Basil" + "Soup"
 //   - "Black" + "Beans" (if they land on separate lines)
 {
-  const topFew = candidates.slice(0, 5);
+  const topFew = candidates.slice(0, 8);
 
   let baseLine: string | null = null;
   let tailLine: string | null = null;
