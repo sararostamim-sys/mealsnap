@@ -74,6 +74,9 @@ const GOOD_GENERAL_SCORE = Number(process.env.OCR_GOOD_GENERAL_SCORE ?? 1200);
 /** ---------- Resolve absolute Tesseract asset paths (GENERAL & PORTABLE) ---------- */
 const require = createRequire(import.meta.url);
 
+// src/app/api/ocr/route.ts (near the top)
+const OCR_PIPELINE_VERSION = '2025-11-21-brown-rice-pasta';
+
 // Strip Next’s virtual “(rsc)” segment that can appear in dev paths
 function stripRsc(p: string) {
   return p.replace(/[\\/]\(rsc\)(?=[\\/]|$)/g, '');
@@ -1896,7 +1899,12 @@ if (merged) {
 
     mark('about to return response');
 
-    return NextResponse.json({ ok: true, text });
+    return NextResponse.json({
+  ok: true,
+  text,
+  version: OCR_PIPELINE_VERSION,
+});
+
   } catch (e) {
     console.error('[OCR] route error:', e);
 

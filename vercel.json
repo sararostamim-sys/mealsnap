@@ -1,7 +1,7 @@
 {
   "functions": {
     "app/api/ocr/route.ts": {
-      "includeFiles": "node_modules/**/tesseract-core*.wasm"
+      "maxDuration": 60
     }
   }
 }
