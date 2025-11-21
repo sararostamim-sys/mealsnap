@@ -1,6 +1,6 @@
 // src/app/pantry/page.tsx
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import { getDevUserId } from '@/lib/user';
@@ -85,67 +85,70 @@ export default function PantryPage() {
   void load();
 }, [load]);
 
-    // Add-or-merge helper: if a matching row exists (same normalized name + unit),
+  // Add-or-merge helper: if a matching row exists (same normalized name + unit),
   // increment qty; otherwise insert a new row.
-  async function upsertPantryItem(input: {
-    name: string;
-    qty?: number;
-    unit?: string;
-    perish_by?: string | null;
-  }) {
-    const userId = await resolveUserId();
-    const nameTrim = input.name.trim();
-    if (!nameTrim) return;
+  const upsertPantryItem = useCallback(
+    async (input: {
+      name: string;
+      qty?: number;
+      unit?: string;
+      perish_by?: string | null;
+    }) => {
+      const userId = await resolveUserId();
+      const nameTrim = input.name.trim();
+      if (!nameTrim) return;
 
-    const qty = Number(input.qty ?? 1) || 1;
-    const unit = input.unit ?? 'unit';
-    const perish_by = input.perish_by ?? null;
+      const qty = Number(input.qty ?? 1) || 1;
+      const unit = input.unit ?? 'unit';
+      const perish_by = input.perish_by ?? null;
 
-    const key = normalizeNameForKey(nameTrim);
+      const key = normalizeNameForKey(nameTrim);
 
-    // Look for an existing row in current state that matches this key + unit
-    const existing = items.find(
-      (i) => normalizeNameForKey(i.name) === key && i.unit === unit
-    );
-
-    if (existing) {
-      const newQty = existing.qty + qty;
-
-      const { error } = await supabase
-        .from('pantry_items')
-        .update({ qty: newQty })
-        .eq('id', existing.id)
-        .eq('user_id', userId);
-
-      if (error) {
-        console.error(error);
-        alert('Failed to update existing item.');
-        return;
-      }
-
-      // Optimistic local update
-      setItems((prev) =>
-        prev.map((i) => (i.id === existing.id ? { ...i, qty: newQty } : i))
+      // Look for an existing row in current state that matches this key + unit
+      const existing = items.find(
+        (i) => normalizeNameForKey(i.name) === key && i.unit === unit
       );
-    } else {
-      const payload = {
-        user_id: userId,
-        name: nameTrim.toLowerCase(),
-        qty,
-        unit,
-        perish_by,
-      };
 
-      const { error } = await supabase.from('pantry_items').insert(payload);
-      if (error) {
-        console.error(error);
-        alert('Failed to add item.');
-        return;
+      if (existing) {
+        const newQty = existing.qty + qty;
+
+        const { error } = await supabase
+          .from('pantry_items')
+          .update({ qty: newQty })
+          .eq('id', existing.id)
+          .eq('user_id', userId);
+
+        if (error) {
+          console.error(error);
+          alert('Failed to update existing item.');
+          return;
+        }
+
+        // Optimistic local update
+        setItems((prev) =>
+          prev.map((i) => (i.id === existing.id ? { ...i, qty: newQty } : i))
+        );
+      } else {
+        const payload = {
+          user_id: userId,
+          name: nameTrim.toLowerCase(),
+          qty,
+          unit,
+          perish_by,
+        };
+
+        const { error } = await supabase.from('pantry_items').insert(payload);
+        if (error) {
+          console.error(error);
+          alert('Failed to add item.');
+          return;
+        }
+
+        // We'll let the caller decide when to call load() to refresh from DB.
       }
-
-      // We'll let the caller decide when to call load() to refresh from DB.
-    }
-  }
+    },
+    [items]
+  );
 
     async function add() {
     if (!form.name.trim()) return;
@@ -161,6 +164,23 @@ export default function PantryPage() {
     setForm({ name: '', qty: 1, unit: 'unit', perish_by: '' });
     await load();
   }
+
+    const handleBarcodeCommit = useCallback(
+    async (item: { name: string; qty?: number; unit?: string }) => {
+      const rawName = item.name ?? '';
+      const niceName = properCaseName(rawName);
+
+      await upsertPantryItem({
+        name: niceName,
+        qty: item.qty ?? 1,
+        unit: item.unit ?? 'unit',
+        perish_by: null,
+      });
+
+      await load();
+    },
+    [upsertPantryItem, load]
+  );
 
   async function remove(id: string) {
     const userId = await resolveUserId();
@@ -326,22 +346,8 @@ for (const r of rows) {
 
         {/* BARCODE */}
         {tab === 'barcode' && (
-          <BarcodeCapture
-            onCommit={async (item) => {
-              const rawName = item.name ?? '';
-const niceName = properCaseName(rawName);
-
-await upsertPantryItem({
-  name: niceName,
-  qty: item.qty ?? 1,
-  unit: item.unit ?? 'unit',
-  perish_by: null,
-});
-              await load();
-            }}
-          />
-        )}
-
+  <MemoBarcodeCapture onCommit={handleBarcodeCommit} />
+)}
         {/* TABLE (using colgroup to rebalance widths) */}
         {loading ? (
           <p className="text-gray-600 dark:text-gray-400">Loading…</p>
@@ -664,3 +670,4 @@ function BarcodeCapture({ onCommit }: { onCommit: (item: { name: string; qty?: n
     </div>
   );
 }
+const MemoBarcodeCapture = React.memo(BarcodeCapture);
