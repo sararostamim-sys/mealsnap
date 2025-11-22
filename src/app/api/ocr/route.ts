@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { detectTextFromBuffer } from '@/lib/vision';
+import type { OcrResult } from '@/lib/ocrTypes';
 
 // Ensure we run in Node (not edge). Tesseract requires Node.
 export const runtime = 'nodejs';
@@ -1910,13 +1911,29 @@ if (merged) {
       });
     }
 
-    mark('about to return response');
+        mark('about to return response');
+
+    // NEW: wrap into unified OcrResult shape
+    const engine: 'vision' | 'tesseract' =
+      FAST_MODE ? 'vision' : 'tesseract';
+
+    const result: OcrResult = {
+      // In your current pipeline, `text` is already your “best label line”
+      // so we treat that as rawText for now.
+      rawText: text || '',
+      lines: (text || '')
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(Boolean),
+      engine,
+    };
 
     return NextResponse.json({
-  ok: true,
-  text,
-  version: OCR_PIPELINE_VERSION,
-});
+      ok: true,
+      result,                 // ✅ unified shape
+      text,                   // ✅ keep for backward compatibility
+      version: OCR_PIPELINE_VERSION,
+    });
 
   } catch (e) {
     console.error('[OCR] route error:', e);

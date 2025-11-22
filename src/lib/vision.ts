@@ -1,6 +1,7 @@
 // src/lib/vision.ts
 import fs from 'node:fs';
 import { ImageAnnotatorClient, protos } from '@google-cloud/vision';
+import { normalizeTextToOcrResult, OcrResult } from './ocrTypes'; // ✅ NEW
 
 /**
  * Credential sources (priority):
@@ -37,8 +38,12 @@ function readServiceAccount(): {
 function getVisionClient(): ImageAnnotatorClient {
   if (_client) return _client;
 
-  const hasInline = !!(process.env.GOOGLE_APPLICATION_CREDENTIALS_DATA && process.env.GOOGLE_APPLICATION_CREDENTIALS_DATA.trim());
-  const hasPath   = !!(process.env.GOOGLE_APPLICATION_CREDENTIALS && process.env.GOOGLE_APPLICATION_CREDENTIALS.trim());
+  const hasInline =
+    !!(process.env.GOOGLE_APPLICATION_CREDENTIALS_DATA &&
+      process.env.GOOGLE_APPLICATION_CREDENTIALS_DATA.trim());
+  const hasPath =
+    !!(process.env.GOOGLE_APPLICATION_CREDENTIALS &&
+      process.env.GOOGLE_APPLICATION_CREDENTIALS.trim());
 
   if (hasInline || hasPath) {
     // Explicit service account
@@ -46,7 +51,7 @@ function getVisionClient(): ImageAnnotatorClient {
     _client = new ImageAnnotatorClient({
       credentials: {
         client_email: sa.client_email,
-        private_key:  sa.private_key,
+        private_key: sa.private_key,
       },
       projectId: sa.project_id,
     });
@@ -81,6 +86,9 @@ export async function detectLabelsFromBuffer(
   }
 }
 
+/**
+ * Low-level helper: returns raw text only (backwards compatible).
+ */
 export async function detectTextFromBuffer(buf: Buffer): Promise<string> {
   const c = getVisionClient();
 
@@ -96,4 +104,13 @@ export async function detectTextFromBuffer(buf: Buffer): Promise<string> {
     // Soft-fail so your pipeline continues
     return '';
   }
+}
+
+/**
+ * NEW: High-level helper for OCR pipeline.
+ * Returns unified OcrResult shape used by /api/ocr.
+ */
+export async function runVisionOcr(buf: Buffer): Promise<OcrResult> {
+  const text = await detectTextFromBuffer(buf);
+  return normalizeTextToOcrResult(text, 'vision');
 }
