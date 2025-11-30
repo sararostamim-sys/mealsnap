@@ -176,6 +176,7 @@ Return ONLY valid JSON in this exact shape and nothing else:
       { ok: true, recipeIds: parsed.recipeIds },
       { status: 200 },
     );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (err: any) {
     console.error('[LLM-PLAN] route error:', err?.message ?? err);
     return NextResponse.json<LlmPlanResponse>(

@@ -357,6 +357,7 @@ export async function ocrDetectSingle(file: File): Promise<DetectedItem[]> {
     throw new Error(await res.text());
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const j: any = await res.json();
 
   const rawText: string =
