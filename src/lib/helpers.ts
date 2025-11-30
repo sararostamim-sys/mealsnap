@@ -37,7 +37,16 @@ export type DetectedItem = {
   raw?: unknown; // opaque payloads as unknown
 };
 
-type OCRResponse = { ok?: boolean; text?: string; error?: string };
+type OCRResponse = {
+  ok?: boolean;
+  text?: string;
+  error?: string;
+  result?: {
+    rawText?: string;
+    lines?: string[];
+    engine?: 'vision' | 'tesseract';
+  };
+};
 
 /* ------------------------------------------------------------------
  * Local normalization utilities (brandless names + tidy case + qty/unit)
@@ -68,6 +77,7 @@ const BRAND_WORDS = [
   'progresso',
   "campbell's",
   'o organics',
+  'organic',
 ].sort((a, b) => b.length - a.length);
 
 const BRAND_RE = new RegExp(
@@ -75,14 +85,35 @@ const BRAND_RE = new RegExp(
   'i'
 );
 
-/** Remove a single leading brand token (and “Brand, product” pattern). */
+/** Remove a single leading brand token + marketing noise. */
 function brandlessName(input: string): string {
   let s = (input || '').trim();
+
+  // 1) Strip known brand names at the front
   s = s.replace(BRAND_RE, '').trim();
-  s = s.replace(/^[^,]+,\s*(.+)$/i, '$1').trim(); // “Brand, Organic Beans” → “Organic Beans”
-  // Normalize whitespace/punct
-  s = s.replace(/[–—]/g, '-').replace(/\s+/g, ' ').replace(/\s*[-,:;]\s*/g, ' ');
-  return s.trim();
+
+  // 2) “Brand, Organic Beans” → “Organic Beans”
+  s = s.replace(/^[^,]+,\s*(.+)$/i, '$1').trim();
+
+  // 3) Drop leading marketing adjectives we don’t model separately
+  //    (organic, gluten-free, low sodium, etc.)
+  s = s.replace(
+    /^(?:\b(organic|gluten[-\s]*free|low\s+sodium|reduced\s+sodium|no\s+salt\s+added)\b[\s,:-]*)+/gi,
+    ''
+  ).trim();
+
+  // 4) Strip “made with …”, “with sea salt”, etc. at the end
+  s = s.replace(/\bmade\s+with\b.*$/i, '').trim();
+  s = s.replace(/\bwith\s+sea\s+salt\b.*$/i, '').trim();
+
+  // 5) General cleanup of spacing / punctuation
+  s = s
+    .replace(/[–—]/g, '-')
+    .replace(/\s*[-,:;]\s*/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
+  return s;
 }
 
 /** Title Case but leave small connector words lower after the first token. */
@@ -192,6 +223,122 @@ function toPantryRow(
   return { name: clean, qty, unit };
 }
 
+// ---- OCR label picker (Vision + Tesseract friendly) ----
+
+// Words that tell us "this is actual food"
+const FOOD_WORD_RE =
+  /\b(beans?|kidney|black|pinto|chickpeas?|garbanzo|lentils?|pasta|fusilli|penne|rigatoni|spaghetti|noodles?|macaroni|rice|quinoa|oats?|cereal|tomato(es)?|sauce|soup|broth|corn|peas|tuna|salmon|chicken)\b/i;
+
+// Stuff we *don't* want to drive the name
+const JUNK_RE =
+  /\b(gluten\s*free|sodium\s*free|usda|net\s*wt|non[-\s]?gmo|made\s+with|sea\s*salt|organic)\b/i;
+
+// Common brand-ish words
+const BRAND_RE_LINE =
+  /\b(trader\s+joe'?s?|kirkland|costco|barilla|rummo|goya|campbell'?s|heinz)\b/i;
+
+function countMatches(text: string, re: RegExp): number {
+  const m = text.match(new RegExp(re.source, re.flags + 'g')) || [];
+  return m.length;
+}
+
+/**
+ * Build candidates from rawText:
+ *  - derive lines from rawText only (ignore result.lines flattening)
+ *  - build 1–3 line combos
+ *  - score by "foodness" vs junk/brand
+ */
+function pickBestOcrLabel(rawText: string, _lines?: string[]): string {
+  const raw = (rawText || '').trim();
+  if (!raw) return '';
+
+  // 1) Derive lines from rawText
+  const lines = raw
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  if (!lines.length) return raw;
+
+  // 2) Normalize lines a bit
+  const cleanLines = lines.map((s) =>
+    s.replace(/\s{2,}/g, ' ').replace(/[–—]/g, '-').trim()
+  );
+
+  type Cand = { text: string; score: number };
+
+  const cands: Cand[] = [];
+
+  const n = cleanLines.length;
+
+  // Build 1–3 line combos
+  for (let i = 0; i < n; i++) {
+    for (let len = 1; len <= 3 && i + len <= n; len++) {
+      const slice = cleanLines.slice(i, i + len);
+      const text = slice.join(' ').replace(/\s{2,}/g, ' ').trim();
+      if (!text) continue;
+
+      // Compute features
+      const foodCount = countMatches(text, FOOD_WORD_RE);
+      const junkCount = countMatches(text, JUNK_RE);
+      const brandCount = countMatches(text, BRAND_RE_LINE);
+
+      // We need at least *one* food word, otherwise skip
+      if (foodCount === 0) continue;
+
+      const lenChars = text.length;
+
+      // Scoring heuristic:
+      //  - big bonus for more food words
+      //  - small bonus for reasonable length (not too tiny, not gigantic)
+      //  - penalty for junk & brand noise
+      let score = 0;
+
+      score += foodCount * 8;
+      if (lenChars >= 8 && lenChars <= 80) {
+        score += 4;
+        if (lenChars >= 14 && lenChars <= 55) score += 4; // "Goldilocks" range
+      }
+
+      score -= junkCount * 2;
+      score -= brandCount * 2;
+
+      cands.push({ text, score });
+    }
+  }
+
+  if (!cands.length) {
+    // Fallback: just pick the longest line that has any letters
+    const fallback = cleanLines
+      .slice()
+      .sort((a, b) => b.length - a.length)[0];
+    return fallback || raw;
+  }
+
+  // Dedupe by lowercase text
+  const dedupMap = new Map<string, Cand>();
+  for (const c of cands) {
+    const k = c.text.toLowerCase();
+    const prev = dedupMap.get(k);
+    if (!prev || c.score > prev.score) dedupMap.set(k, c);
+  }
+  const dedup = Array.from(dedupMap.values());
+
+  // Sort best-first
+  dedup.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+
+  const best = dedup[0];
+
+  if (typeof window !== 'undefined') {
+    // Debug on the client only
+    console.log('[pickBestOcrLabel] lines:', cleanLines);
+    console.log('[pickBestOcrLabel] candidates:', dedup);
+    console.log('[pickBestOcrLabel] chosen:', best);
+  }
+
+  return best?.text || raw;
+}
+
 /* ------------------------------------------------------------------
  * OCR flow
  * -----------------------------------------------------------------*/
@@ -203,36 +350,58 @@ function toPantryRow(
  */
 export async function ocrDetectSingle(file: File): Promise<DetectedItem[]> {
   const fd = new FormData();
-  fd.append('image', file); // <-- matches your /api/ocr handler
+  fd.append('image', file); // <-- matches /api/ocr handler
 
   const res = await fetch('/api/ocr', { method: 'POST', body: fd });
-  if (!res.ok) throw new Error(await res.text());
+  if (!res.ok) {
+    throw new Error(await res.text());
+  }
 
-  const j: unknown = await res.json();
-  const json: OCRResponse = (typeof j === 'object' && j !== null) ? (j as OCRResponse) : {};
+  const j: any = await res.json();
 
-  const text: string = json.text ?? '';
-  // Turn the big merged text into a small list of candidate item names
-  const tokens = text
-    .toLowerCase()
-    .split(/\n|,|;|\/|•|·|\s{2,}/g)
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const rawText: string =
+    j?.result?.rawText ??
+    j?.text ??
+    '';
 
-  const candidates = Array.from(
-    new Set(tokens.filter((t) => /[a-z]/.test(t) && t.length >= 3 && t.length <= 48))
-  ).slice(0, 8);
+  const linesFromRaw = rawText
+    ? rawText.split(/\r?\n/).map((s: string) => s.trim()).filter(Boolean)
+    : [];
 
-  return candidates.map((t) => {
-    const row = toPantryRow(t);
-    return {
+  const lines: string[] =
+    j?.result?.lines && Array.isArray(j.result.lines) && j.result.lines.length > 0
+      ? j.result.lines
+      : linesFromRaw;
+
+  const label = pickBestOcrLabel(rawText, lines);
+
+  // Debug: see what we’re feeding into the label picker and what comes out
+  if (typeof window !== 'undefined') {
+    console.log('[ocrDetectSingle] rawText:', rawText);
+    console.log('[ocrDetectSingle] linesFromRaw:', linesFromRaw);
+    console.log('[ocrDetectSingle] linesArg:', lines);
+    console.log('[ocrDetectSingle] picked label:', label);
+  }
+
+  if (!label) {
+    return [];
+  }
+
+  const row = toPantryRow(label);
+
+  return [
+    {
       name: row.name,
       qty: row.qty,
       unit: row.unit,
-      confidence: 0.7,
-      raw: { source: 'ocr', token: t } as const,
-    };
-  });
+      confidence: 0.9,
+      raw: {
+        source: 'ocr',
+        rawText,
+        label,
+      },
+    },
+  ];
 }
 
 /* ------------------- UPC lookup helper ------------------- */

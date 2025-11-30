@@ -1,53 +1,76 @@
 // src/lib/vision.ts
 import fs from 'node:fs';
 import { ImageAnnotatorClient, protos } from '@google-cloud/vision';
-import { normalizeTextToOcrResult, OcrResult } from './ocrTypes'; // ✅ NEW
+import { normalizeTextToOcrResult, OcrResult } from './ocrTypes';
+
+type ServiceAccount = {
+  client_email: string;
+  private_key: string;
+  project_id?: string;
+};
 
 /**
  * Credential sources (priority):
  * 1) GOOGLE_APPLICATION_CREDENTIALS_DATA  (preferred): raw SA JSON
  * 2) GOOGLE_APPLICATION_CREDENTIALS       : filesystem path to SA JSON
- * 3) ADC (Application Default Credentials) : fallback if neither 1 nor 2 are set
+ * 3) ADC (Application Default Credentials) : fallback if neither 1 nor 2 are valid
  */
 
 let _client: ImageAnnotatorClient | null = null;
 
-function readServiceAccount(): {
-  client_email: string;
-  private_key: string;
-  project_id?: string;
-} {
+function readServiceAccount(): ServiceAccount | null {
+  // 1) Inline JSON
   const inline = process.env.GOOGLE_APPLICATION_CREDENTIALS_DATA;
   if (inline && inline.trim()) {
-    return JSON.parse(inline);
+    try {
+      const parsed = JSON.parse(inline);
+      return {
+        client_email: parsed.client_email,
+        private_key: parsed.private_key,
+        project_id: parsed.project_id,
+      };
+    } catch (e) {
+      console.error('[Vision] Failed to parse GOOGLE_APPLICATION_CREDENTIALS_DATA:', e);
+      // Fall through to other methods / ADC
+    }
   }
 
+  // 2) File path
   const keyPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
   if (keyPath && keyPath.trim()) {
-    const raw = fs.readFileSync(keyPath, 'utf8');
-    return JSON.parse(raw);
+    try {
+      if (!fs.existsSync(keyPath)) {
+        console.warn(
+          `[Vision] GOOGLE_APPLICATION_CREDENTIALS points to '${keyPath}', ` +
+            'but the file does not exist. Falling back to ADC.'
+        );
+        return null;
+      }
+      const raw = fs.readFileSync(keyPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      return {
+        client_email: parsed.client_email,
+        private_key: parsed.private_key,
+        project_id: parsed.project_id,
+      };
+    } catch (e) {
+      console.error('[Vision] Failed to read/parse service account file:', e);
+      // Fall back to ADC instead of crashing
+      return null;
+    }
   }
 
-  // Let caller decide whether to use ADC instead of throwing here.
-  throw new Error(
-    'Missing Vision credentials. Set GOOGLE_APPLICATION_CREDENTIALS_DATA (preferred) ' +
-      'or GOOGLE_APPLICATION_CREDENTIALS (file path).'
-  );
+  // 3) Nothing explicit → let ADC handle it
+  return null;
 }
 
 function getVisionClient(): ImageAnnotatorClient {
   if (_client) return _client;
 
-  const hasInline =
-    !!(process.env.GOOGLE_APPLICATION_CREDENTIALS_DATA &&
-      process.env.GOOGLE_APPLICATION_CREDENTIALS_DATA.trim());
-  const hasPath =
-    !!(process.env.GOOGLE_APPLICATION_CREDENTIALS &&
-      process.env.GOOGLE_APPLICATION_CREDENTIALS.trim());
+  const sa = readServiceAccount();
 
-  if (hasInline || hasPath) {
+  if (sa) {
     // Explicit service account
-    const sa = readServiceAccount();
     _client = new ImageAnnotatorClient({
       credentials: {
         client_email: sa.client_email,
@@ -55,9 +78,11 @@ function getVisionClient(): ImageAnnotatorClient {
       },
       projectId: sa.project_id,
     });
+    console.log('[Vision] Using explicit service account credentials.');
   } else {
-    // ADC (gcloud auth, GCP runtime, or platform-secret based)
+    // ADC (gcloud auth, runtime identity, Vercel secret-backed, etc.)
     _client = new ImageAnnotatorClient();
+    console.log('[Vision] Using Application Default Credentials (ADC).');
   }
 
   return _client;
@@ -80,7 +105,8 @@ export async function detectLabelsFromBuffer(
       .map(a => a.description ?? '')
       .filter(Boolean)
       .slice(0, max);
-  } catch {
+  } catch (e) {
+    console.warn('[Vision] LABEL_DETECTION failed (soft-fail):', (e as Error)?.message ?? e);
     // Soft-fail so your pipeline continues
     return [];
   }
@@ -100,14 +126,15 @@ export async function detectTextFromBuffer(buf: Buffer): Promise<string> {
   try {
     const [res] = await c.annotateImage(req);
     return res.fullTextAnnotation?.text?.trim() ?? '';
-  } catch {
+  } catch (e) {
+    console.warn('[Vision] TEXT_DETECTION failed (soft-fail):', (e as Error)?.message ?? e);
     // Soft-fail so your pipeline continues
     return '';
   }
 }
 
 /**
- * NEW: High-level helper for OCR pipeline.
+ * High-level helper for OCR pipeline.
  * Returns unified OcrResult shape used by /api/ocr.
  */
 export async function runVisionOcr(buf: Buffer): Promise<OcrResult> {

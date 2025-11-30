@@ -532,26 +532,32 @@ function UploadPhoto({ onConfirm }: { onConfirm: (rows: { name: string; qty: num
   const [rows, setRows] = useState<DetectedItem[] | null>(null);
 
   async function pickOne() {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = 'image/*';
-    input.onchange = async () => {
-      const f = input.files?.[0];
-      if (!f) return;
-      setPending(true);
-      try {
-        const items = await ocrDetectSingle(f); // /api/ocr
-        const dedup = Array.from(new Map(items.map(i => [i.name, i])).values()).slice(0, 10);
-        setRows(dedup);
-      } catch (e) {
-        console.error(e);
-        alert(`OCR failed: ${String(e)}`);
-      } finally {
-        setPending(false);
-      }
-    };
-    input.click();
-  }
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.onchange = async () => {
+    const f = input.files?.[0];
+    if (!f) return;
+    setPending(true);
+    try {
+      // ✅ Use shared helper so dev + prod behave the same
+      const items = await ocrDetectSingle(f);
+      console.log('[UploadPhoto] items from OCR:', items);
+
+      const dedup = Array.from(
+        new Map(items.map((i) => [i.name, i])).values()
+      ).slice(0, 10);
+
+      setRows(dedup);
+    } catch (e) {
+      console.error(e);
+      alert(`OCR failed: ${String(e)}`);
+    } finally {
+      setPending(false);
+    }
+  };
+  input.click();
+}
 
   if (rows) {
     return (

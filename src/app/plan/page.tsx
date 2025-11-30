@@ -6,10 +6,21 @@ import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import FavoriteButton from '@/components/FavoriteButton';
 import { getDevUserId } from '@/lib/user';
+import { smartMergeNeeds, ShoppingItem, RawNeed } from '@/lib/shopping';
+import { STORES, getPriceEstimate, StoreId } from '@/lib/pricing';
+import { buildInstacartUrl, buildWalmartUrl, buildAmazonFreshUrl, } from '@/lib/groceryLinks';
 
 type Recipe = { id: string; title: string; time_min: number; diet_tags: string[] | null; instructions: string };
 type Ing = { recipe_id: string; name: string; qty: number | null; unit: string | null; optional: boolean };
-type Prefs = { diet: string; allergies: string[]; dislikes: string[]; max_prep_minutes: number; budget_level: string; updated_at?: string };
+type Prefs = {
+  diet: string;
+  allergies: string[];
+  dislikes: string[];
+  max_prep_minutes: number;
+  budget_level: string;
+  favorite_mode: 'variety' | 'favorites';
+  updated_at?: string;
+};
 type PantryRow = { name: string; updated_at: string };
 type PlanItem = { recipe_id: string; position: number };
 type PlanHeader = { id: string; generated_at: string; user_meal_plan_recipes?: PlanItem[] };
@@ -19,8 +30,137 @@ type PrefsRow = Partial<{
   disliked_ingredients: string[];
   max_prep_time: number;
   budget_level: string;
+  favorite_mode: string;
   updated_at: string;
 }>;
+
+// How we present items in the UI / Notes
+type DisplayShoppingItem = {
+  qtyLabel: string;
+  unitLabel: string;
+  nameLabel: string; // what user sees in the first column / bullet text
+};
+
+type FavoriteRow = {
+  recipe_id: string;
+};
+
+function formatApproxVolume(qty: number, unit: string): string {
+  const u = unit.toLowerCase();
+
+  // Normalize tbsp/tsp into cups for display
+  if (u === 'tbsp') {
+    const cups = qty / 16; // 16 tbsp = 1 cup
+    if (cups >= 0.25) return `${Math.round(cups * 10) / 10} cup`;
+    return `${qty} tbsp`;
+  }
+
+  if (u === 'tsp') {
+    const cups = qty / 48; // 48 tsp = 1 cup
+    if (cups >= 0.25) return `${Math.round(cups * 10) / 10} cup`;
+    return `${qty} tsp`;
+  }
+
+  if (u === 'cup' || u === 'cups') {
+    return `${qty} cup`;
+  }
+
+  // If it's already g/ml/etc, just use that
+  return unit ? `${qty} ${unit}` : `${qty}`;
+}
+
+function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
+  const name = item.name;
+  const qty = item.qty;
+  const unit = item.unit;
+
+  // Items that are usually bought as containers, not tablespoons/cups
+  const PACKAGEY = /(milk|yogurt|cheese|feta|mozzarella|tomato sauce|sauce|broth|stock|cream)/i;
+  const HERB_BUNCH = /(basil|dill)/i;
+  const LEAFY_BAG = /spinach/i;
+
+  // Count-ish items (onion, lemon, etc.) will already be in group "count"
+  // so unit === 'unit' and qty is an integer (from the fromBase(count) logic).
+  const isCountUnit = unit === 'unit';
+
+// Liquids / dairy / cheese / sauce: show 1 container + amount in cups/units
+if (PACKAGEY.test(name)) {
+  const approxAmount =
+    unit && unit !== 'unit'
+      ? formatApproxVolume(qty, unit)   // 👈 use cups instead of tbsp
+      : `${qty}`;
+
+  return {
+    qtyLabel: '1',
+    unitLabel: '', // think "1 container"
+    nameLabel: `${name} (about ${approxAmount})`,
+  };
+}
+
+// Leafy greens like spinach → 1 bag once amount is large
+if (LEAFY_BAG.test(name)) {
+  if (unit === 'cup' && qty >= 2) {
+    const approx = `${qty} cup`;
+    return {
+      qtyLabel: '1',
+      unitLabel: 'bag',
+      nameLabel: `${name} (about ${approx})`,
+    };
+  }
+  // fall through to default formatting if it's a small amount
+}
+
+// Herbs like basil / dill → 1 bunch once amount is large
+if (HERB_BUNCH.test(name)) {
+  const bigEnough =
+    (unit === 'unit' && qty >= 5) ||           // e.g. 6 basil
+    ((unit === 'tbsp' || unit === 'tsp') && qty >= 2);
+
+  if (bigEnough) {
+    return {
+      qtyLabel: '1',
+      unitLabel: 'bunch',
+      nameLabel: name,
+    };
+  }
+  // small amounts (1 tbsp dill, 2 basil) fall through
+}
+
+  // For normal count items (onion, lemon, garlic, tortillas): show "2 onion", "6 tortilla"
+  if (isCountUnit) {
+    return {
+      qtyLabel: String(qty),
+      unitLabel: '',
+      nameLabel: name,
+    };
+  }
+
+  // Default: just show merged qty + unit + name
+  const unitLabel = unit === 'unit' ? '' : unit;
+
+  return {
+    qtyLabel: String(qty),
+    unitLabel,
+    nameLabel: name,
+  };
+}
+
+function escapeRegex(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasAnyTerm(name: string, terms: Set<string>): boolean {
+  const lower = name.toLowerCase();
+  for (const t of terms) {
+    const term = t.toLowerCase().trim();
+    if (!term) continue;
+
+    // match “egg” and “eggs” but not “vegetable”
+    const rx = new RegExp(`\\b${escapeRegex(term)}s?\\b`, 'i');
+    if (rx.test(lower)) return true;
+  }
+  return false;
+}
 
 export default function PlanPage() {
   useRequireAuth();
@@ -34,12 +174,44 @@ export default function PlanPage() {
   const [ings, setIngs] = useState<Ing[]>([]);
 
   const [meals, setMeals] = useState<Recipe[]>([]);
-  const [shopping, setShopping] = useState<{ name: string; qty: number; unit: string }[]>([]);
+  const [shopping, setShopping] = useState<ShoppingItem[]>([]);
   const [planMeta, setPlanMeta] = useState<{ id: string; generated_at: string } | null>(null);
   const [stale, setStale] = useState(false);
 
+  const enablePriceHints = process.env.NEXT_PUBLIC_ENABLE_PRICE_HINTS === '1';
+  const [storeId, setStoreId] = useState<StoreId>('none');
+
   // Modal state
   const [openId, setOpenId] = useState<string | null>(null);
+
+  // NEW: track whether this plan came from LLM vs heuristic
+  const [plannerMode, setPlannerMode] = useState<'llm' | 'heuristic' | null>(null);
+
+  const [favorites, setFavorites] = useState<Set<string>>(new Set());
+
+  // NEW: which external shop the user wants to use for links
+  const [shopPlatform, setShopPlatform] = useState<
+  'none' | 'instacart' | 'walmart' | 'amazon'
+  >('none');
+
+    // Derived shopping list with price estimates (if enabled)
+  const pricedShopping = useMemo(() => {
+    return shopping.map((item) => {
+      const est = getPriceEstimate(
+        { name: item.name, qty: item.qty, unit: item.unit },
+        storeId
+      );
+      return {
+        ...item,
+        estPrice: est.price,
+        estPriceUnit: est.unitLabel,
+      };
+    });
+  }, [shopping, storeId]);
+
+  const estTotal = useMemo(() => {
+    return pricedShopping.reduce((sum, it) => sum + (it.estPrice ?? 0), 0);
+  }, [pricedShopping]);
 
   /** Prefer authenticated user; fall back to .env dev id */
   async function resolveUserId(): Promise<string> {
@@ -60,24 +232,28 @@ export default function PlanPage() {
     return m;
   }, [ings]);
 
-  // Recompute shopping list from chosen meals + current pantry
-  const recomputeShopping = useCallback((chosen: Recipe[]) => {
-    const pantrySet = new Set(pantry.map(p => p.name.toLowerCase()));
-    const need = new Map<string, { name: string; qty: number; unit: string }>();
+  // Recompute shopping list from chosen meals + current pantry (Smart List v1)
+const recomputeShopping = useCallback((chosen: Recipe[]) => {
+  const pantrySet = new Set(pantry.map(p => p.name.toLowerCase()));
+  const rawNeeds: RawNeed[] = [];
 
-    for (const r of chosen) {
-      const ri = ingByRecipe.get(r.id) || [];
-      for (const it of ri) {
-        const name = it.name.toLowerCase();
-        if (!pantrySet.has(name)) {
-          const key = `${name}|${it.unit ?? 'unit'}`;
-          const cur = need.get(key) || { name, qty: 0, unit: it.unit ?? 'unit' };
-          need.set(key, { ...cur, qty: cur.qty + (Number(it.qty) || 1) });
-        }
-      }
+  for (const r of chosen) {
+    const ri = ingByRecipe.get(r.id) || [];
+    for (const it of ri) {
+      const nameLower = it.name.toLowerCase();
+      if (pantrySet.has(nameLower)) continue; // already have it in pantry
+
+      rawNeeds.push({
+        name: it.name,
+        qty: it.qty ?? 1,
+        unit: it.unit ?? 'unit',
+      });
     }
-    setShopping(Array.from(need.values()));
-  }, [ingByRecipe, pantry]);
+  }
+
+  const merged = smartMergeNeeds(rawNeeds);
+  setShopping(merged);
+}, [ingByRecipe, pantry]);
 
   // Keep shopping list in sync when meals or ingredients change
   useEffect(() => {
@@ -90,19 +266,22 @@ export default function PlanPage() {
       setLoading(true);
       const uid = await resolveUserId();
 
-      const [pItems, pRes, rRes, iRes] = await Promise.all([
-        supabase.from('pantry_items')
-          .select('name,updated_at')
-          .eq('user_id', uid),
-        supabase.from('preferences')
-          .select('*')
-          .eq('user_id', uid)
-          .maybeSingle(),
-        supabase.from('recipes')
-          .select('id,title,time_min,diet_tags,instructions'),
-        supabase.from('recipe_ingredients')
-          .select('recipe_id,name,qty,unit,optional'),
-      ]);
+      const [pItems, pRes, rRes, iRes, favRes] = await Promise.all([
+     supabase.from('pantry_items')
+     .select('name,updated_at')
+     .eq('user_id', uid),
+     supabase.from('preferences')
+     .select('*')
+     .eq('user_id', uid)
+     .maybeSingle(),
+     supabase.from('recipes')
+     .select('id,title,time_min,diet_tags,instructions'),
+     supabase.from('recipe_ingredients')
+     .select('recipe_id,name,qty,unit,optional'),
+     supabase.from('favorites')
+     .select('recipe_id')
+     .eq('user_id', uid),
+     ]);
 
       const pantryRows: PantryRow[] = (pItems.data || []).map(x => ({
         name: String(x.name).toLowerCase(),
@@ -113,24 +292,30 @@ export default function PlanPage() {
       // Map DB columns → local Prefs shape
       const pr = (pRes.data ?? null) as PrefsRow | null;
       const prefsRow: Prefs = pr ? {
-        diet: pr.diet ?? 'none',
-        allergies: pr.allergies ?? [],
-        dislikes: pr.disliked_ingredients ?? [],
-        max_prep_minutes: pr.max_prep_time ?? 45,
-        budget_level: pr.budget_level ?? 'medium',
-        updated_at: pr.updated_at ?? undefined
-      } : {
-        diet: 'none',
-        allergies: [],
-        dislikes: [],
-        max_prep_minutes: 45,
-        budget_level: 'medium',
-      };
+     diet: pr.diet ?? 'none',
+     allergies: pr.allergies ?? [],
+     dislikes: pr.disliked_ingredients ?? [],
+     max_prep_minutes: pr.max_prep_time ?? 45,
+     budget_level: pr.budget_level ?? 'medium',
+     favorite_mode: pr.favorite_mode === 'favorites' ? 'favorites' : 'variety',
+     updated_at: pr.updated_at ?? undefined,
+    } : {
+     diet: 'none',
+     allergies: [],
+    dislikes: [],
+     max_prep_minutes: 45,
+    budget_level: 'medium',
+    favorite_mode: 'variety',
+    };
       setPrefs(prefsRow);
 
       const recipeRows: Recipe[] = rRes.data || [];
       setRecipes(recipeRows);
       setIngs(iRes.data || []);
+
+      // Build favorites set for quick lookup
+      const favSet = new Set<string>((favRes.data || []).map((f: FavoriteRow) => f.recipe_id));
+      setFavorites(favSet);
 
       // Load latest saved plan (+ items) for this user
       const { data: plan } = await supabase
@@ -160,7 +345,7 @@ export default function PlanPage() {
 
   }, []);
 
-  // Generate a fresh plan and persist it
+  // Generate a fresh 7-day dinner plan and persist it
   const generateAndSave = useCallback(async () => {
     if (!prefs || !userId) return;
 
@@ -168,56 +353,223 @@ export default function PlanPage() {
     const dislike = new Set((prefs.dislikes || []).map(d => d.toLowerCase()));
     const pantrySet = new Set(pantry.map(p => p.name));
 
+    // Build ingredient index (same as before)
     const ingIndex = new Map<string, Ing[]>();
     ings.forEach(i => {
       const arr = ingIndex.get(i.recipe_id) || [];
-      arr.push(i); ingIndex.set(i.recipe_id, arr);
+      arr.push(i);
+      ingIndex.set(i.recipe_id, arr);
     });
 
-    const scored = recipes.map(r => {
-      const ri = ingIndex.get(r.id) || [];
-      let score = 0;
-      // prefer faster recipes
-      score += r.time_min <= (prefs.max_prep_minutes ?? 45) ? 2 : -2;
-      // diet tag boost
-      if (prefs.diet !== 'none' && (r.diet_tags || []).includes(prefs.diet)) score += 1;
-      // pantry usage / avoid allergens / dislikes
-      for (const it of ri) {
-        const name = it.name.toLowerCase();
-        if (pantrySet.has(name)) score += 1;
-        if (allergy.has(name)) return { r, score: -999, ri }; // hard reject
-        if (dislike.has(name)) score -= 2;
-      }
-      return { r, score, ri };
-    })
-    .filter(x => x.score > -500)
-    .sort((a, b) => b.score - a.score);
+      // ---------- 0) Build filtered recipe pool based on preferences ----------
 
-    const chosen = scored.slice(0, 7).map(x => x.r);
+  // Very simple diet enforcement: block obvious meat words when vegetarian / vegan.
+  const DIET_FORBIDDEN_BY_ING: Record<string, RegExp[]> = {
+    vegetarian: [
+      /\bchicken\b/i,
+      /\bbeef\b/i,
+      /\bpork\b/i,
+      /\bham\b/i,
+      /\bsausage\b/i,
+      /\bbacon\b/i,
+      /\bturkey\b/i,
+      /\bshrimp\b/i,
+      /\banchovies?\b/i,
+    ],
+    vegan: [
+      /\bchicken\b/i,
+      /\bbeef\b/i,
+      /\bpork\b/i,
+      /\bham\b/i,
+      /\bsausage\b/i,
+      /\bbacon\b/i,
+      /\bturkey\b/i,
+      /\bshrimp\b/i,
+      /\banchovies?\b/i,
+      /\beggs?\b/i,
+      /\bcheese\b/i,
+      /\bmilk\b/i,
+      /\byogurt\b/i,
+      /\bbutter\b/i,
+    ],
+  };
 
-    // 1) create plan header
+  function violatesDiet(ri: Ing[], diet: string): boolean {
+  const rules = DIET_FORBIDDEN_BY_ING[diet] || [];
+  if (!rules.length) return false; // diet === 'none' or not handled yet
+  return ri.some(it => rules.some(rx => rx.test(it.name)));
+}
+
+  function hasForbiddenFromSet(ri: Ing[], terms: Set<string>): boolean {
+    if (!terms.size) return false;
+    return ri.some(it => hasAnyTerm(it.name, terms));
+  }
+
+  // ---------- 0) Apply hard preference filters (diet + allergies + dislikes) ----------
+const filteredRecipes: Recipe[] = recipes.filter(r => {
+  const ri = ingIndex.get(r.id) || [];
+
+  // 1) Diet rules (no meat words when vegetarian/vegan, etc.)
+  if (violatesDiet(ri, prefs.diet)) return false;
+
+  // 2) Allergies → hard block
+  if (hasForbiddenFromSet(ri, allergy)) return false;
+
+  // 3) Dislikes → also block (we can soften this later if you want)
+  if (hasForbiddenFromSet(ri, dislike)) return false;
+
+  return true;
+});
+
+// If everything was filtered out, fall back to full list so the app still works.
+const pool: Recipe[] = filteredRecipes.length ? filteredRecipes : recipes;
+if (!filteredRecipes.length) {
+  console.warn('[PLAN] All recipes filtered by prefs; falling back to full list.');
+}
+
+// We'll fill this from LLM or heuristic
+let chosen: Recipe[] | null = null;
+
+    try {
+      const pantryNames = Array.from(pantrySet);
+
+      const recipeLite = pool.map(r => ({
+        id: r.id,
+        title: r.title,
+        time_min: r.time_min,
+        diet_tags: r.diet_tags,
+        ingredients: (ingIndex.get(r.id) || []).map(it => it.name.toLowerCase()),
+        is_favorite: favorites.has(r.id),
+      }));
+
+      const res = await fetch('/api/llm-plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pantryNames,
+          prefs: {
+            diet: prefs.diet,
+            allergies: prefs.allergies,
+            dislikes: prefs.dislikes,
+            max_prep_minutes: prefs.max_prep_minutes,
+            budget_level: prefs.budget_level,
+            favorite_mode: prefs.favorite_mode,
+          },
+          recipes: recipeLite,
+          days: 7,
+        }),
+      });
+
+      if (res.ok) {
+  const data: { ok: boolean; recipeIds?: string[] } = await res.json();
+  if (data.ok && data.recipeIds && data.recipeIds.length) {
+    const byId = new Map(pool.map(r => [r.id, r]));
+
+    const picked = data.recipeIds
+      .map(id => byId.get(id))
+      .filter((r): r is Recipe => !!r);
+
+    if (picked.length) {
+      // Extra safety: enforce diet + allergies + dislikes on the final list too
+      const finalPicked = picked.filter(r => {
+        const ri = ingIndex.get(r.id) || [];
+        if (violatesDiet(ri, prefs.diet)) return false;
+        if (hasForbiddenFromSet(ri, allergy)) return false;
+        if (hasForbiddenFromSet(ri, dislike)) return false;
+        return true;
+      });
+
+      chosen = finalPicked.length ? finalPicked : picked;
+      setPlannerMode('llm'); // <--- NEW
+      console.log('[PLAN] Using LLM-selected recipes:', chosen.map(p => p.title));
+    }
+  }
+} else {
+  console.warn('[PLAN] /api/llm-plan returned status', res.status);
+}
+    } catch (e) {
+      console.error('[PLAN] LLM plan failed (falling back to heuristic):', e);
+    }
+
+    // ---------- 2) Fallback: your existing heuristic, unchanged ----------
+    if (!chosen || !chosen.length) {
+      const scored = pool
+        .map(r => {
+    const ri = ingIndex.get(r.id) || [];
+    let score = 0;
+
+    // 1) Prefer faster recipes
+    score += r.time_min <= (prefs.max_prep_minutes ?? 45) ? 2 : -2;
+
+    // 2) Diet tag boost (if applicable)
+    if (prefs.diet !== 'none' && (r.diet_tags || []).includes(prefs.diet)) {
+      score += 1;
+    }
+
+    // 3) Pantry usage / avoid allergens / dislikes
+    for (const it of ri) {
+      const name = it.name.toLowerCase();
+      if (pantrySet.has(name)) score += 1;
+      if (allergy.has(name)) return { r, score: -999, ri }; // hard reject
+      if (dislike.has(name)) score -= 2;
+    }
+
+   // NEW unified favorites weighting
+    if (favorites.has(r.id)) {
+   score += prefs.favorite_mode === 'favorites' ? 6 : 1; 
+    // ↑ tune numbers as desired
+    // 'favorites' → strong boost
+    // 'variety' → minimal boost (so LLM/heuristic leans toward new recipes)
+   }
+
+    return { r, score, ri };
+  })
+  .filter(x => x.score > -500)
+  .sort((a, b) => b.score - a.score);
+
+      const fallbackChosen = scored.slice(0, 7).map(x => x.r);
+      chosen = fallbackChosen;
+      setPlannerMode('heuristic');
+      console.log(
+        '[PLAN] Using heuristic-selected recipes (fallback):',
+        fallbackChosen.map(p => p.title)
+      );
+    }
+
+    if (!chosen || !chosen.length) {
+      console.warn('[PLAN] No recipes chosen even after fallback');
+      return;
+    }
+
+    // ---------- 3) Persist to Supabase (unchanged) ----------
     const { data: planRow, error: planErr } = await supabase
       .from('user_meal_plan')
       .insert({ user_id: userId })
       .select('id,generated_at')
       .single();
-    if (planErr || !planRow) { console.error(planErr); return; }
+    if (planErr || !planRow) {
+      console.error(planErr);
+      return;
+    }
 
-    // 2) insert plan items
     const itemsPayload = chosen.map((r, idx) => ({
       plan_id: planRow.id,
       recipe_id: r.id,
       position: idx,
     }));
-    const { error: itemsErr } = await supabase.from('user_meal_plan_recipes').insert(itemsPayload);
-    if (itemsErr) { console.error(itemsErr); return; }
+    const { error: itemsErr } = await supabase
+      .from('user_meal_plan_recipes')
+      .insert(itemsPayload);
+    if (itemsErr) {
+      console.error(itemsErr);
+      return;
+    }
 
-    // 3) update UI
     setMeals(chosen);
     setPlanMeta({ id: planRow.id, generated_at: planRow.generated_at });
     setStale(false);
     recomputeShopping(chosen);
-  }, [prefs, userId, pantry, ings, recipes, recomputeShopping]);
+  }, [prefs, userId, pantry, ings, recipes, recomputeShopping, favorites]);
 
   function downloadCSV() {
     const header = 'name,qty,unit';
@@ -230,6 +582,44 @@ export default function PlanPage() {
     URL.revokeObjectURL(url);
   }
 
+  function copyToClipboard() {
+  if (!shopping.length) {
+    alert('Shopping list is empty.');
+    return;
+  }
+
+  const lines = shopping.map((s) => {
+    const disp = formatShoppingItem(s);
+    const qtyPart = disp.qtyLabel ? `${disp.qtyLabel} ` : '';
+    const unitPart = disp.unitLabel ? `${disp.unitLabel} ` : '';
+    return `• ${qtyPart}${unitPart}${disp.nameLabel}`.trim();
+  });
+
+  const text = lines.join('\n');
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text)
+      .then(() => {
+        alert('Shopping list copied. You can paste it into Notes or any app.');
+      })
+      .catch(() => {
+        alert('Could not copy automatically. You can select and copy the list manually.');
+      });
+  } else {
+    alert('Clipboard is not available in this browser. You can select and copy the list manually.');
+  }
+}
+
+  // NEW: does this plan include at least one favorite?
+  const hasFavoriteInPlan = useMemo(() => {
+  if (!favorites || favorites.size === 0 || meals.length === 0) return false;
+  return meals.some(m => favorites.has(m.id));
+  }, [meals, favorites]);
+
+    // NEW: should we show the favorites badge at all?
+  const showFavoritesBadge =
+    hasFavoriteInPlan && !stale && prefs?.favorite_mode === 'favorites';
+
   if (loading) return <p className="max-w-3xl mx-auto">Loading…</p>;
 
   const openRecipe = meals.find(m => m.id === openId) || null;
@@ -237,31 +627,109 @@ export default function PlanPage() {
   const generatedLabel = planMeta ? new Date(planMeta.generated_at).toLocaleString() : null;
 
   return (
-    <div className="max-w-3xl mx-auto">
-      {/* Header OUTSIDE card (matches Pantry/Preferences) */}
-      <div className="flex items-start justify-between mb-4">
-        <div>
-          <h1 className="text-2xl font-semibold mb-1 text-gray-900 dark:text-gray-100">
-            Your 7-Day Plan
-          </h1>
-          {generatedLabel && !stale && (
-            <p className="text-sm text-gray-600 dark:text-gray-400">Generated on {generatedLabel}</p>
-          )}
-          {stale && (
-            <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-sm
-                            dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100">
-              Your pantry or preferences changed since this plan was created.
-              <span className="ml-2 font-medium">Regenerate to refresh.</span>
+      <div className="max-w-3xl mx-auto">
+      {/* Header */}
+      <div className="mb-4">
+        {/* Row 1: title (L) / pills (center) / button (R) */}
+        <div className="flex items-start justify-between gap-4">
+          {/* LEFT: title only */}
+          <div className="flex-1 min-w-0">
+            <h1 className="text-2xl font-semibold text-gray-900 dark:text-gray-100">
+              Your 7-Day Plan
+            </h1>
+          </div>
+
+          {/* CENTER: AI + favorites pills */}
+          <div className="flex flex-col items-center justify-center gap-1 px-2">
+            {plannerMode === 'llm' && !stale && (
+              <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200">
+                This plan was AI-optimized ✨
+              </div>
+            )}
+
+            {showFavoritesBadge && (
+              <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200">
+                ⭐ Prioritized your favorites
+              </div>
+            )}
+          </div>
+
+          {/* RIGHT: regenerate button */}
+          <div className="flex-shrink-0 pt-1">
+            <button
+              onClick={generateAndSave}
+              className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
+            >
+              {meals.length ? 'Regenerate plan' : 'Generate plan'}
+            </button>
+          </div>
+        </div>
+
+        {/* Row 2: date – always left, full width */}
+        {generatedLabel && (
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+            Generated on {generatedLabel}
+          </p>
+        )}
+
+        {/* Row 3: shop with / price store / disclaimer – always left, under date */}
+        <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
+          {/* Preferred grocery platform */}
+          <div className="flex items-center gap-2">
+            <label className="text-gray-700 dark:text-gray-300">
+              Shop with
+            </label>
+            <select
+           className="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100"
+           value={shopPlatform}
+           onChange={(e) =>
+           setShopPlatform(
+            e.target.value as 'none' | 'instacart' | 'walmart' | 'amazon'
+           )
+           }
+            >
+  <option value="none">Choose…</option>
+  <option value="instacart">Instacart</option>
+  <option value="walmart">Walmart</option>
+  <option value="amazon">Amazon Fresh</option>
+</select>
+          </div>
+
+          {/* Price hints store selector */}
+          {enablePriceHints && (
+            <div className="flex items-center gap-2">
+              <label className="text-gray-700 dark:text-gray-300">
+                Price store
+              </label>
+              <select
+                className="rounded border px-2 py-1 border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100"
+                value={storeId}
+                onChange={(e) => setStoreId(e.target.value as StoreId)}
+              >
+                {STORES.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.label}
+                  </option>
+                ))}
+              </select>
             </div>
+          )}
+
+          {/* Tiny disclaimer – stays on the left, wraps on small screens */}
+          {enablePriceHints && (
+            <span className="text-xs text-gray-500 dark:text-gray-400">
+              Example pricing only – not yet store- or zip-specific.
+            </span>
           )}
         </div>
 
-        <button
-          onClick={generateAndSave}
-          className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
-        >
-          {meals.length ? 'Regenerate plan' : 'Generate plan'}
-        </button>
+        {/* Stale warning – still left, below controls */}
+        {stale && (
+          <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-sm dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100">
+            Your pantry or preferences changed since this plan was created.
+            <span className="ml-2 font-medium">Regenerate to refresh.</span>
+          </div>
+        )}
       </div>
 
       {/* Content card starts ABOVE Meals */}
@@ -298,33 +766,95 @@ export default function PlanPage() {
           <h2 className="text-xl font-semibold mt-6 mb-2 text-gray-900 dark:text-gray-100">Shopping List</h2>
           <div className="overflow-x-auto">
             <table className="w-full text-sm border border-gray-200 dark:border-gray-800">
-              <thead className="bg-gray-50 dark:bg-neutral-900">
+                            <thead className="bg-gray-50 dark:bg-neutral-900">
                 <tr>
                   <th className="text-left p-2">Item</th>
                   <th className="text-left p-2">Qty</th>
                   <th className="text-left p-2">Unit</th>
+                  {enablePriceHints && storeId !== 'none' && (
+                    <th className="text-right p-2">Est. Price</th>
+                  )}
+                  {shopPlatform !== 'none' && (
+                    <th className="text-left p-2">Shop</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
-                {shopping.map((s, idx) => (
-                  <tr key={idx} className="border-t border-gray-200 dark:border-gray-800">
-                    <td className="p-2">{s.name}</td>
-                    <td className="p-2">{s.qty}</td>
-                    <td className="p-2">{s.unit}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                {pricedShopping.map((s, idx) => {
+                  const disp = formatShoppingItem(s);
+                  const shopUrl =
+                 shopPlatform === 'instacart'
+                 ? buildInstacartUrl(s.name)
+                  : shopPlatform === 'walmart'
+                 ? buildWalmartUrl(s.name)
+                 : shopPlatform === 'amazon'
+                  ? buildAmazonFreshUrl(s.name)
+                  : null;
 
-          <div className="mt-3">
-            <button
-              onClick={downloadCSV}
-              className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
-            >
-              Download CSV
-            </button>
+                  return (
+                    <tr
+                      key={idx}
+                      className="border-t border-gray-200 dark:border-gray-800"
+                    >
+                      <td className="p-2">{disp.nameLabel}</td>
+                      <td className="p-2">{disp.qtyLabel}</td>
+                      <td className="p-2">{disp.unitLabel}</td>
+
+                      {enablePriceHints && storeId !== 'none' && (
+                        <td className="p-2 text-right">
+                          {s.estPrice != null ? `$${s.estPrice.toFixed(2)}` : '—'}
+                        </td>
+                      )}
+
+                      {shopPlatform !== 'none' && (
+                        <td className="p-2">
+                          {shopUrl ? (
+                            <a
+                           href={shopUrl}
+                           target="_blank"
+                           rel="noreferrer"
+                           className="text-xs text-indigo-600 hover:underline"
+                           >
+                           Open in{' '}
+                           {shopPlatform === 'instacart'
+                           ? 'Instacart'
+                           : shopPlatform === 'walmart'
+                           ? 'Walmart'
+                           : 'Amazon Fresh'}
+                           </a>
+                          ) : (
+                            <span className="text-xs text-gray-400">—</span>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
+              </tbody>
+          </table>
           </div>
+           {enablePriceHints && storeId !== 'none' && (
+            <p className="mt-2 text-sm text-gray-700 dark:text-gray-300">
+              Estimated total (for items with example prices):{' '}
+              <span className="font-medium">
+                ${estTotal.toFixed(2)}
+              </span>
+            </p>
+           )}
+          <div className="mt-3 flex flex-wrap gap-2">
+         <button
+         onClick={downloadCSV}
+         className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black"
+         >
+          Download CSV
+         </button>
+         <button
+         onClick={copyToClipboard}
+          className="rounded px-4 py-2 border border-gray-300 dark:border-gray-700 text-sm text-gray-800 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-neutral-800"
+         >
+          Copy list (for Notes)
+        </button>
+       </div>
         </div>
       )}
 

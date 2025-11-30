@@ -12,6 +12,7 @@ type Prefs = {
   dislikes: string[];
   max_prep_minutes: number;
   budget_level: string;
+  favorite_mode: 'variety' | 'favorites';
 };
 
 const DIETS = ['none', 'vegetarian', 'vegan', 'gluten_free', 'halal', 'kosher'] as const;
@@ -21,12 +22,14 @@ export default function PreferencesPage() {
   useRequireAuth();
 
   const [prefs, setPrefs] = useState<Prefs>({
-    diet: 'none',
-    allergies: [],
-    dislikes: [],
-    max_prep_minutes: 45,
-    budget_level: 'medium',
+  diet: 'none',
+  allergies: [],
+  dislikes: [],
+  max_prep_minutes: 45,
+  budget_level: 'medium',
+  favorite_mode: 'variety', // default
   });
+
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
 
@@ -46,15 +49,16 @@ export default function PreferencesPage() {
         .eq('user_id', userId)
         .maybeSingle();
       if (data) {
-        setPrefs({
-          user_id: data.user_id,
-          diet: data.diet ?? 'none',
-          allergies: data.allergies ?? [],
-          dislikes: data.disliked_ingredients ?? [],
-          max_prep_minutes: data.max_prep_time ?? 45,
-          budget_level: data.budget_level ?? 'medium',
-        });
-      }
+     setPrefs({
+     user_id: data.user_id,
+     diet: data.diet ?? 'none',
+     allergies: data.allergies ?? [],
+     dislikes: data.disliked_ingredients ?? [],
+     max_prep_minutes: data.max_prep_time ?? 45,
+     budget_level: data.budget_level ?? 'medium',
+     favorite_mode: data.favorite_mode === 'favorites' ? 'favorites' : 'variety',
+     });
+     }
       setLoading(false);
     })();
   }, []);
@@ -72,13 +76,14 @@ export default function PreferencesPage() {
     const userId = await resolveUserId();
 
     const payload = {
-      user_id: userId,
-      diet: prefs.diet,
-      allergies: prefs.allergies,
-      disliked_ingredients: prefs.dislikes,
-      max_prep_time: prefs.max_prep_minutes,
-      budget_level: prefs.budget_level,
-    };
+   user_id: userId,
+   diet: prefs.diet,
+   allergies: prefs.allergies,
+   disliked_ingredients: prefs.dislikes,
+   max_prep_time: prefs.max_prep_minutes,
+   budget_level: prefs.budget_level,
+   favorite_mode: prefs.favorite_mode,
+   };
 
     const { error } = await supabase.from('preferences').upsert(payload, { onConflict: 'user_id' });
     if (!error) setSaved(true);
@@ -159,7 +164,7 @@ export default function PreferencesPage() {
           </div>
         </div>
 
-        {/* Numbers/select row */}
+                {/* Numbers/select row */}
         <div className="mb-4 flex flex-wrap gap-6">
           <div>
             <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">Max prep minutes</label>
@@ -183,6 +188,33 @@ export default function PreferencesPage() {
                 <option key={b} value={b}>{b}</option>
               ))}
             </select>
+          </div>
+        </div>
+
+        {/* Plan style: variety vs favorites */}
+        <div className="mb-5">
+          <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
+            Plan style
+          </label>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setPrefs(p => ({ ...p, favorite_mode: 'variety' }))}
+              className={`${chipBase} ${
+                prefs.favorite_mode === 'variety' ? chipOn : chipOff
+              }`}
+            >
+              Prefer more variety
+            </button>
+            <button
+              type="button"
+              onClick={() => setPrefs(p => ({ ...p, favorite_mode: 'favorites' }))}
+              className={`${chipBase} ${
+                prefs.favorite_mode === 'favorites' ? chipOn : chipOff
+              }`}
+            >
+              Repeat my favorites often
+            </button>
           </div>
         </div>
 
