@@ -37,16 +37,16 @@ export type DetectedItem = {
   raw?: unknown; // opaque payloads as unknown
 };
 
-type OCRResponse = {
-  ok?: boolean;
-  text?: string;
-  error?: string;
-  result?: {
-    rawText?: string;
-    lines?: string[];
-    engine?: 'vision' | 'tesseract';
-  };
-};
+//type OCRResponse = {
+  //ok?: boolean;
+  //text?: string;
+  //error?: string;
+  //result?: {
+  //  rawText?: string;
+  //  lines?: string[];
+  //  engine?: 'vision' | 'tesseract';
+  //};
+//};
 
 /* ------------------------------------------------------------------
  * Local normalization utilities (brandless names + tidy case + qty/unit)
@@ -248,6 +248,7 @@ function countMatches(text: string, re: RegExp): number {
  *  - build 1–3 line combos
  *  - score by "foodness" vs junk/brand
  */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function pickBestOcrLabel(rawText: string, _lines?: string[]): string {
   const raw = (rawText || '').trim();
   if (!raw) return '';

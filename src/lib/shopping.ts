@@ -1,5 +1,7 @@
 // src/lib/shopping.ts
 
+import { autoCategoryFromName, type PantryCategory } from '@/lib/pantryCategorizer';
+
 export type RawNeed = {
   name: string;
   qty: number | null;
@@ -10,6 +12,7 @@ export type ShoppingItem = {
   name: string;   // normalized name (lowercase, singular-ish)
   qty: number;    // merged quantity
   unit: string;   // normalized unit
+  category?: PantryCategory; // auto-categorized store section
 };
 
 /** ---------- Name normalization ---------- */
@@ -245,10 +248,11 @@ export function smartMergeNeeds(needs: RawNeed[]): ShoppingItem[] {
   }
 
   const out: ShoppingItem[] = [];
-  for (const { name, group, base } of agg.values()) {
+   for (const { name, group, base } of agg.values()) {
     const { qty, unit } = fromBase(group, base);
-    out.push({ name, qty, unit });
-  }
+    const category = autoCategoryFromName(name);
+    out.push({ name, qty, unit, category });
+   }
 
   // Sort alphabetically by name
   out.sort((a, b) => a.name.localeCompare(b.name));
