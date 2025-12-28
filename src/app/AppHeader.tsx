@@ -16,11 +16,12 @@ export default function AppHeader() {
   const pathname = usePathname();
   const router = useRouter();
 
-  // Hide header on home and login
+  // Hide header on home, login, and share pages
   const hide =
     pathname === '/' ||
     pathname === '/login' ||
-    pathname?.startsWith('/login');
+    pathname?.startsWith('/login') ||
+    pathname?.startsWith('/share');
 
   const [loading, setLoading] = useState(true);
   const [isAuthed, setIsAuthed] = useState(false);

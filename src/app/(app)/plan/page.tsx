@@ -1,7 +1,7 @@
 // src/app/plan/page.tsx
 'use client';
 
-import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { DEFAULT_HEALTHY_WHOLE_FOOD_PROFILE } from '@/lib/healthyProfile';
 import type { HealthyProfile } from '@/lib/healthyProfile';
@@ -18,7 +18,9 @@ import {
 import { computeRecipePerishability, scoreFromPerishDate } from '@/lib/perishables';
 import type { PantryCategory } from '@/lib/pantryCategorizer';
 import { prettyCategoryLabel } from '@/lib/pantryCategorizer';
-import React, { Fragment } from 'react';
+import React, { Fragment, Suspense } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { trackEvent } from '@/lib/analytics';
 
 type Recipe = {
   id: string;
@@ -26,6 +28,10 @@ type Recipe = {
   time_min: number;
   diet_tags: string[] | null;
   instructions: string;
+
+  // Optional fields for richer previews (safe even if DB doesn’t have them yet)
+  calories?: number | null;   // per serving
+  protein_g?: number | null;  // per serving
 };
 
 type Ing = {
@@ -67,6 +73,7 @@ type PlanItem = { recipe_id: string; position: number };
 type PlanHeader = {
   id: string;
   generated_at: string;
+  share_id: string | null;
   user_meal_plan_recipes?: PlanItem[];
 };
 
@@ -207,6 +214,59 @@ function hasAnyTerm(name: string, terms: Set<string>): boolean {
   return false;
 }
 
+function expandAllergyTerms(allergies: string[]): Set<string> {
+  const base = allergies.map((a) => a.toLowerCase().trim()).filter(Boolean);
+
+  // Map “high-level” allergy toggles → ingredient keywords we actually see in recipe_ingredients
+  const MAP: Record<string, string[]> = {
+    dairy: [
+      'milk',
+      'cheese',
+      'butter',
+      'yogurt',
+      'cream',
+      'sour cream',
+      'whey',
+      'casein',
+      'ghee',
+      'mozzarella',
+      'cheddar',
+      'parmesan',
+      'feta',
+    ],
+    gluten: [
+      'wheat',
+      'flour',
+      'bread',
+      'pasta',
+      'noodle',
+      'tortilla',
+      'cracker',
+      'breadcrumb',
+      'breadcrumbs',
+      'soy sauce', // often contains wheat unless tamari
+    ],
+    egg: ['egg', 'eggs', 'mayonnaise', 'mayo'],
+    peanut: ['peanut', 'peanuts'],
+    shellfish: ['shrimp', 'prawn', 'crab', 'lobster', 'clam', 'mussel', 'oyster', 'scallop'],
+    soy: ['soy', 'tofu', 'edamame', 'miso', 'tempeh', 'soy sauce'],
+    sesame: ['sesame', 'tahini'],
+  };
+
+  const out = new Set<string>();
+
+  for (const a of base) {
+    out.add(a);
+
+    const extras = MAP[a];
+    if (extras && extras.length) {
+      for (const x of extras) out.add(x.toLowerCase());
+    }
+  }
+
+  return out;
+}
+
 function getHealthSwapHintForItem(
   item: { name: string; category?: PantryCategory },
   prefs: Prefs | null,
@@ -270,8 +330,43 @@ function getHealthSwapHintForItem(
   return null;
 }
 
-export default function PlanPage() {
+function uniqueByIdLimit(recipes: Recipe[], limit: number): Recipe[] {
+  const seen = new Set<string>();
+  const out: Recipe[] = [];
+
+  for (const r of recipes) {
+    if (!r?.id) continue;
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    out.push(r);
+    if (out.length >= limit) break;
+  }
+
+  return out;
+}
+
+async function sha256Hex(input: string): Promise<string> {
+  try {
+    if (typeof window === 'undefined') return input; // should never happen in this client file
+    if (!window.crypto?.subtle) return input;
+
+    const enc = new TextEncoder();
+    const bytes = enc.encode(input);
+    const hashBuf = await window.crypto.subtle.digest('SHA-256', bytes);
+    const hashArr = Array.from(new Uint8Array(hashBuf));
+    return hashArr.map((b) => b.toString(16).padStart(2, '0')).join('');
+  } catch {
+    // Fallback: return the raw string (still stable, just longer)
+    return input;
+  }
+}
+
+function PlanPageInner() {
   useRequireAuth();
+
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   const [loading, setLoading] = useState(true);
   const [userId, setUserId] = useState<string | null>(null);
@@ -282,10 +377,14 @@ export default function PlanPage() {
   const [ings, setIngs] = useState<Ing[]>([]);
 
   const [meals, setMeals] = useState<Recipe[]>([]);
+  const meals7 = useMemo(() => uniqueByIdLimit(meals, 7), [meals]);
+
   const [shopping, setShopping] = useState<ShoppingItem[]>([]);
-  const [planMeta, setPlanMeta] = useState<{ id: string; generated_at: string } | null>(
-    null,
-  );
+  const [planMeta, setPlanMeta] = useState<{
+  id: string;
+  generated_at: string;
+  share_id?: string | null;
+  } | null>(null);
   const [stale, setStale] = useState(false);
 
   const enablePriceHints = process.env.NEXT_PUBLIC_ENABLE_PRICE_HINTS === '1';
@@ -293,6 +392,25 @@ export default function PlanPage() {
 
   // Modal state
   const [openId, setOpenId] = useState<string | null>(null);
+
+    // Auto-open recipe modal when arriving with ?open=<recipeId>
+   useEffect(() => {
+    const id = searchParams.get('open');
+    if (!id) return;
+
+    // Only open if we can actually resolve this recipe in the current plan list
+    const inPlan = meals7.some((m) => m.id === id);
+    if (inPlan) setOpenId(id);
+  }, [searchParams, meals7]);
+
+  function closeRecipeModal() {
+    setOpenId(null);
+
+    // If the URL contains ?open=..., remove it so the modal doesn't reopen on refresh/back
+    if (searchParams.get('open')) {
+      router.replace(pathname);
+    }
+  }
 
   // NEW: track whether this plan came from LLM vs heuristic
   const [plannerMode, setPlannerMode] = useState<'llm' | 'heuristic' | null>(
@@ -308,6 +426,12 @@ export default function PlanPage() {
 
   // Healthy micro-survey answers (loaded from localStorage)
   const [healthySurvey, setHealthySurvey] = useState<HealthySurvey | null>(null);
+
+  const [generating, setGenerating] = useState(false);
+
+  const generatingRef = useRef(false);
+  const lastPlanReqKeyRef = useRef<string | null>(null);
+  const lastPlanReqAtRef = useRef<number>(0);
 
   // Derived shopping list with price estimates (if enabled)
   const pricedShopping = useMemo(() => {
@@ -390,8 +514,8 @@ export default function PlanPage() {
 
   // Keep shopping list in sync when meals or ingredients change
   useEffect(() => {
-    if (meals.length) recomputeShopping(meals);
-  }, [meals, recomputeShopping]);
+    if (meals7.length) recomputeShopping(meals7);
+  }, [meals7, recomputeShopping]);
 
   // Initial load: user + pantry/prefs/recipes/ings + latest saved plan
   useEffect(() => {
@@ -469,7 +593,7 @@ export default function PlanPage() {
       // Load latest saved plan (+ items) for this user
       const { data: plan } = await supabase
         .from('user_meal_plan')
-        .select('id, generated_at, user_meal_plan_recipes (recipe_id, position)')
+        .select('id, generated_at, share_id, user_meal_plan_recipes (recipe_id, position)')
         .eq('user_id', uid)
         .order('generated_at', { ascending: false })
         .limit(1)
@@ -484,7 +608,7 @@ export default function PlanPage() {
           .map((it) => byId.get(it.recipe_id))
           .filter(Boolean) as Recipe[];
         setMeals(chosen);
-        setPlanMeta({ id: plan.id, generated_at: plan.generated_at });
+        setPlanMeta({ id: plan.id, generated_at: plan.generated_at, share_id: plan.share_id ?? null });
 
         // Staleness: if pantry/prefs changed after plan.generated_at
         const pantryMax = pantryRows.length
@@ -519,8 +643,19 @@ export default function PlanPage() {
   }, []);
 
   // Generate a fresh 7-day dinner plan and persist it
-  const generateAndSave = useCallback(async () => {
+    const generateAndSave = useCallback(async () => {
     if (!prefs || !userId) return;
+    trackEvent('generate_plan_click');
+
+    // Prevent duplicate generations (double click, re-entrancy, slow network)
+    if (generatingRef.current) {
+      console.log('[PLAN] generateAndSave ignored (already running)');
+      return;
+    }
+    generatingRef.current = true;
+    setGenerating(true);
+
+    try {
 
     // Use local survey if present, otherwise fall back to DB-stored answers
     const effectiveSurvey: HealthySurvey | null =
@@ -573,8 +708,8 @@ export default function PlanPage() {
       }
     }
 
-    const allergy = new Set((prefs.allergies || []).map((a) => a.toLowerCase()));
-    const dislike = new Set((prefs.dislikes || []).map((d) => d.toLowerCase()));
+    const allergy = expandAllergyTerms(prefs.allergies || []);
+    const dislike = new Set((prefs.dislikes || []).map((d) => d.toLowerCase()));    
     const pantrySet = new Set(pantry.map((p) => p.name));
 
     // Build ingredient index (same as before)
@@ -645,6 +780,7 @@ export default function PlanPage() {
     }
 
     let chosen: Recipe[] | null = null;
+    let mode: 'llm' | 'heuristic' | null = null;
 
     try {
       const pantryNames = Array.from(pantrySet);
@@ -660,6 +796,39 @@ export default function PlanPage() {
         is_favorite: favorites.has(r.id),
       }));
 
+            // Build the exact payload we send to /api/llm-plan (so the key is meaningful)
+      const llmPayload = {
+        pantryNames,
+        prefs: {
+          diet: prefs.diet,
+          allergies: prefs.allergies,
+          dislikes: prefs.dislikes,
+          max_prep_minutes: prefs.max_prep_minutes,
+          budget_level: prefs.budget_level,
+          // favorite_mode: prefs.favorite_mode,
+          // healthy_whole_food: prefs.healthy_whole_food,
+          // kid_friendly: prefs.kid_friendly,
+          // healthy_goal: prefs.healthy_goal,
+          // healthy_protein_style: prefs.healthy_protein_style,
+          // healthy_carb_pref: prefs.healthy_carb_pref,
+        },
+        recipes: recipeLite,
+        days: 7,
+        healthyProfile, // may be undefined
+      };
+
+      // Skip identical inputs if user clicks regenerate repeatedly (prevents extra API calls + extra saved plans)
+      const reqKey = await sha256Hex(JSON.stringify(llmPayload));
+      const nowTs = Date.now();
+      const tooSoonMs = 30_000; // 30 seconds (tunable)
+      if (
+        lastPlanReqKeyRef.current === reqKey &&
+        nowTs - lastPlanReqAtRef.current < tooSoonMs
+      ) {
+        console.log('[PLAN] Skipping LLM call: identical inputs too soon');
+        return;
+      }
+
       const res = await fetch('/api/llm-plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -671,12 +840,12 @@ export default function PlanPage() {
             dislikes: prefs.dislikes,
             max_prep_minutes: prefs.max_prep_minutes,
             budget_level: prefs.budget_level,
-//            favorite_mode: prefs.favorite_mode,
-//            healthy_whole_food: prefs.healthy_whole_food,
-//            kid_friendly: prefs.kid_friendly,
-//            healthy_goal: prefs.healthy_goal,
-//            healthy_protein_style: prefs.healthy_protein_style,
-//            healthy_carb_pref: prefs.healthy_carb_pref,
+   //            favorite_mode: prefs.favorite_mode,
+   //            healthy_whole_food: prefs.healthy_whole_food,
+   //            kid_friendly: prefs.kid_friendly,
+   //            healthy_goal: prefs.healthy_goal,
+   //            healthy_protein_style: prefs.healthy_protein_style,
+   //            healthy_carb_pref: prefs.healthy_carb_pref,
           },
           recipes: recipeLite,
           days: 7,
@@ -704,10 +873,14 @@ export default function PlanPage() {
 
             chosen = finalPicked.length ? finalPicked : picked;
             setPlannerMode('llm');
+            mode = 'llm';
             console.log(
               '[PLAN] Using LLM-selected recipes:',
               chosen.map((p) => p.title),
             );
+            // Mark this input as the latest successful request
+            lastPlanReqKeyRef.current = reqKey;
+            lastPlanReqAtRef.current = Date.now();
           }
         }
       } else {
@@ -756,6 +929,7 @@ export default function PlanPage() {
       const fallbackChosen = scored.slice(0, 7).map((x) => x.r);
       chosen = fallbackChosen;
       setPlannerMode('heuristic');
+      mode = 'heuristic';
       console.log(
         '[PLAN] Using heuristic-selected recipes (fallback):',
         fallbackChosen.map((p) => p.title),
@@ -790,12 +964,24 @@ export default function PlanPage() {
     withPerishableScore.sort((a, b) => b.perishability - a.perishability);
     chosen = withPerishableScore.map((x) => x.recipe);
 
+    // Ensure we always save exactly 7 unique recipes (defensive against LLM duplicates / over-return)
+   chosen = uniqueByIdLimit(chosen, 7);
+
+   if (chosen.length < 7) {
+   console.warn('[PLAN] Fewer than 7 unique recipes after filtering/dedupe:', chosen.length);
+   }
+
     // ---------- 3) Persist to Supabase ----------
-    const { data: planRow, error: planErr } = await supabase
-      .from('user_meal_plan')
-      .insert({ user_id: userId })
-      .select('id,generated_at')
-      .single();
+    const newShareId =
+   (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+   const { data: planRow, error: planErr } = await supabase
+   .from('user_meal_plan')
+   .insert({ user_id: userId, share_id: newShareId })
+   .select('id,generated_at,share_id')
+   .single();
     if (planErr || !planRow) {
       console.error(planErr);
       return;
@@ -815,9 +1001,18 @@ export default function PlanPage() {
     }
 
     setMeals(chosen);
-    setPlanMeta({ id: planRow.id, generated_at: planRow.generated_at });
+    setPlanMeta({ id: planRow.id, generated_at: planRow.generated_at, share_id: planRow.share_id ?? null });
     setStale(false);
     recomputeShopping(chosen);
+    trackEvent('generate_plan_success', {
+    plan_id: planRow.id,
+    share_id: planRow.share_id ?? null,
+    mode,
+   });
+    } finally {
+      generatingRef.current = false;
+      setGenerating(false);
+    }
   }, [
     prefs,
     userId,
@@ -876,6 +1071,57 @@ export default function PlanPage() {
     }
   }
 
+  async function copyShareLink() {
+  if (!planMeta?.id) {
+    alert('No plan to share yet. Generate a plan first.');
+    return;
+  }
+
+  let shareId = planMeta.share_id ?? null;
+
+  // If this plan doesn't have a share_id yet, create one now.
+  if (!shareId) {
+    const generated =
+      (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    const { data, error } = await supabase
+      .from('user_meal_plan')
+      .update({ share_id: generated })
+      .eq('id', planMeta.id)
+      .select('share_id')
+      .single();
+
+    if (error) {
+      console.error(error);
+      alert('Could not create a share link. Please try again.');
+      return;
+    }
+
+    const shareRow = data as unknown as { share_id?: string | null } | null;
+    shareId = shareRow?.share_id ?? null;
+
+    // ✅ IMPORTANT: use share_id: shareId (not share_id)
+    setPlanMeta((prev) => (prev ? { ...prev, share_id: shareId } : prev));
+  }
+
+  if (!shareId) {
+    alert('Could not create a share link. Please try again.');
+    return;
+  }
+
+  const url = `${window.location.origin}/share/plan/${shareId}`;
+
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(url);
+    alert('Share link copied!');
+    trackEvent('copy_share_link', { plan_id: planMeta.id, share_id: shareId });
+  } else {
+    prompt('Copy this share link:', url);
+  }
+}
+
   // NEW: does this plan include at least one favorite?
   const hasFavoriteInPlan = useMemo(() => {
     if (!favorites || favorites.size === 0 || meals.length === 0) return false;
@@ -928,11 +1174,61 @@ export default function PlanPage() {
 
   if (loading) return <p className="max-w-3xl mx-auto">Loading…</p>;
 
-  const openRecipe = meals.find((m) => m.id === openId) || null;
+  const openRecipe = meals7.find((m) => m.id === openId) || null;
   const openIngs = openId ? ingByRecipe.get(openId) || [] : [];
   const generatedLabel = planMeta
     ? new Date(planMeta.generated_at).toLocaleString()
     : null;
+  
+  // Allergens present in the open recipe, based on user preferences (mapped to real ingredient words)
+const allergyHits: string[] = (() => {
+  if (!prefs || !openRecipe || !openIngs.length) return [];
+
+  const toggles = (prefs.allergies ?? [])
+    .map((a) => a.toLowerCase().trim())
+    .filter(Boolean);
+
+  if (!toggles.length) return [];
+
+  // Map toggles -> keyword lists (so UI shows "dairy", but we match "milk", "cheese", etc.)
+  const TOGGLE_TO_KEYWORDS: Record<string, string[]> = {
+    dairy: Array.from(expandAllergyTerms(['dairy'])),
+    gluten: Array.from(expandAllergyTerms(['gluten'])),
+    egg: Array.from(expandAllergyTerms(['egg'])),
+    peanut: Array.from(expandAllergyTerms(['peanut'])),
+    shellfish: Array.from(expandAllergyTerms(['shellfish'])),
+    soy: Array.from(expandAllergyTerms(['soy'])),
+    sesame: Array.from(expandAllergyTerms(['sesame'])),
+  };
+
+  const hits = new Set<string>();
+
+  for (const it of openIngs) {
+    const lowerName = it.name.toLowerCase();
+
+    for (const toggle of toggles) {
+      const keywords = TOGGLE_TO_KEYWORDS[toggle] ?? [toggle];
+
+      for (const kw of keywords) {
+        const term = kw.toLowerCase().trim();
+        if (!term) continue;
+        const rx = new RegExp(`\\b${escapeRegex(term)}s?\\b`, 'i');
+        if (rx.test(lowerName)) {
+          hits.add(toggle); // <-- store the TOGGLE label (e.g. "dairy")
+          break;
+        }
+      }
+    }
+  }
+
+  return Array.from(hits);
+})();
+
+  // Do we have any numeric nutrition data on this recipe?
+  const hasNutrition =
+    !!openRecipe &&
+    (typeof openRecipe.calories === 'number' ||
+      typeof openRecipe.protein_g === 'number');  
 
   return (
     <div className="max-w-3xl mx-auto">
@@ -962,22 +1258,37 @@ export default function PlanPage() {
           </div>
 
           {/* RIGHT: regenerate button */}
-          <div className="flex-shrink-0 pt-1">
-            <button
-              onClick={generateAndSave}
-              className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg:white dark:text-black"
-            >
-              {meals.length ? 'Regenerate plan' : 'Generate plan'}
-            </button>
-          </div>
+        <div className="flex-shrink-0 pt-[2px]">
+  <button
+    onClick={generateAndSave}
+    disabled={generating}
+    className={`rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black ${
+      generating ? 'opacity-50 cursor-not-allowed' : ''
+    }`}
+  >
+    {generating ? 'Generating…' : meals.length ? 'Regenerate plan' : 'Generate plan'}
+  </button>
+</div>
         </div>
 
         {/* Row 2: date */}
         {generatedLabel && (
-          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-            Generated on {generatedLabel}
-          </p>
-        )}
+  <div className="mt-1 flex items-center justify-between gap-4">
+    <p className="text-sm text-gray-600 dark:text-gray-400">
+      Generated on {generatedLabel}
+    </p>
+
+    <button
+      onClick={copyShareLink}
+      disabled={!planMeta}
+      className={`rounded px-4 py-2 border border-gray-300 dark:border-gray-700 text-sm
+        text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-neutral-800
+        ${!planMeta ? 'opacity-50 cursor-not-allowed' : ''}`}
+    >
+      Copy share link
+    </button>
+  </div>
+)}
 
         {/* Row 3: shop with / price store / disclaimer */}
         <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
@@ -1043,7 +1354,7 @@ export default function PlanPage() {
             Meals
           </h2>
           <div className="grid md:grid-cols-2 gap-4">
-            {meals.map((m) => (
+            {meals7.map((m) => (
               <div
                 key={m.id}
                 className="border rounded p-3 border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900"
@@ -1215,8 +1526,8 @@ export default function PlanPage() {
       )}
 
       {/* Modal */}
-      <Modal open={!!openId} onClose={() => setOpenId(null)}>
-        {openRecipe ? (
+      <Modal open={!!openId} onClose={closeRecipeModal}>
+                {openRecipe ? (
           <div>
             <div className="flex items-start justify-between">
               <h3 className="text-xl font-semibold">{openRecipe.title}</h3>
@@ -1228,6 +1539,7 @@ export default function PlanPage() {
               {openRecipe.time_min} min
             </div>
 
+            {/* Ingredients */}
             <h4 className="font-medium mt-3 mb-1">Ingredients</h4>
             <ul className="list-disc pl-5 space-y-1">
               {openIngs.map((it, idx) => (
@@ -1243,6 +1555,61 @@ export default function PlanPage() {
               )}
             </ul>
 
+            {/* Allergens (based on your saved Preferences) */}
+            {prefs && (
+              <div className="mt-4">
+                <h4 className="font-medium mb-1">Allergens</h4>
+
+                {allergyHits.length > 0 ? (
+                  <div className="flex flex-wrap gap-1.5 text-xs">
+                    {allergyHits.map((a) => (
+                      <span
+                        key={a}
+                        className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-red-800 dark:bg-red-900/40 dark:text-red-200"
+                      >
+                        ⚠ {a}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    Based on your saved allergies, we don&apos;t see a direct match
+                    in this ingredient list. Please still double-check ingredients
+                    and packaging.
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Nutrition */}
+            <div className="mt-4">
+              <h4 className="font-medium mb-1">Nutrition (per serving)</h4>
+
+              {hasNutrition ? (
+                <ul className="space-y-0.5 text-sm text-gray-700 dark:text-gray-300">
+                  {typeof openRecipe.calories === 'number' && (
+                    <li>
+                      <span className="font-medium">
+                        {Math.round(openRecipe.calories)} kcal
+                      </span>
+                    </li>
+                  )}
+                  {typeof openRecipe.protein_g === 'number' && (
+                    <li>{openRecipe.protein_g} g protein</li>
+                  )}
+                </ul>
+              ) : (
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  Nutrition estimates are coming soon for this recipe.
+                </p>
+              )}
+
+              <p className="mt-1 text-xs text-gray-500 dark:text-gray-500">
+                This information is an estimate only and is not medical advice.
+              </p>
+            </div>
+
+            {/* Instructions */}
             <h4 className="font-medium mt-4 mb-1">Instructions</h4>
             <p className="whitespace-pre-wrap leading-relaxed">
               {openRecipe.instructions}
@@ -1250,7 +1617,7 @@ export default function PlanPage() {
 
             <div className="mt-4 text-right">
               <button
-                onClick={() => setOpenId(null)}
+                onClick={closeRecipeModal}
                 className="rounded border px-4 py-2 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-neutral-800"
               >
                 Close
@@ -1260,6 +1627,14 @@ export default function PlanPage() {
         ) : null}
       </Modal>
     </div>
+  );
+}
+
+export default function PlanPage() {
+  return (
+    <Suspense fallback={<p className="max-w-3xl mx-auto">Loading…</p>}>
+      <PlanPageInner />
+    </Suspense>
   );
 }
 

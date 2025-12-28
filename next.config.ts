@@ -3,6 +3,9 @@
 const nextConfig = {
   serverExternalPackages: ['sharp', 'tesseract.js', 'tesseract.js-core'],
 
+  // ✅ Add this to silence the Next 16 Turbopack + webpack config error
+  turbopack: {},
+
   outputFileTracingIncludes: {
     '/api/ocr': [
       // Tesseract worker + core
@@ -16,16 +19,16 @@ const nextConfig = {
   },
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-webpack(config: any, { isServer }: { isServer: boolean }) {
-  if (isServer) {
-    config.ignoreWarnings = config.ignoreWarnings || [];
-    // Silence the benign dynamic-require warning from tesseract.js
-    config.ignoreWarnings.push(
-      /Critical dependency: the request of a dependency is an expression/i
-    );
-  }
-  return config;
-},
+  webpack(config: any, { isServer }: { isServer: boolean }) {
+    if (isServer) {
+      config.ignoreWarnings = config.ignoreWarnings || [];
+      // Silence the benign dynamic-require warning from tesseract.js
+      config.ignoreWarnings.push(
+        /Critical dependency: the request of a dependency is an expression/i,
+      );
+    }
+    return config;
+  },
 };
 
 export default nextConfig;
