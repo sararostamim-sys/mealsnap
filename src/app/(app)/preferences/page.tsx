@@ -19,6 +19,8 @@ type Prefs = {
   healthy_goal: 'feel_better' | 'weight' | 'metabolic' | '';
   healthy_protein_style: 'mixed' | 'lean_animal' | 'plant_forward' | '';
   healthy_carb_pref: 'more_whole_grains' | 'lower_carb' | 'no_preference' | '';
+  dinners_per_week: number; // 3–7
+  people_count: number;     // 1–6
 };
 
 type HealthySurvey = {
@@ -48,6 +50,8 @@ export default function PreferencesPage() {
     healthy_goal: '',
     healthy_protein_style: '',
     healthy_carb_pref: '',
+    dinners_per_week: 7,
+    people_count: 2,
   });
 
   const [loading, setLoading] = useState(true);
@@ -95,6 +99,8 @@ export default function PreferencesPage() {
             (data.healthy_protein_style as Prefs['healthy_protein_style']) ?? '',
           healthy_carb_pref:
             (data.healthy_carb_pref as Prefs['healthy_carb_pref']) ?? '',
+          dinners_per_week: data.dinners_per_week ?? 7,
+          people_count: data.people_count ?? 2,
         });
       }
 
@@ -156,6 +162,9 @@ export default function PreferencesPage() {
       healthy_goal: prefs.healthy_goal || null,
       healthy_protein_style: prefs.healthy_protein_style || null,
       healthy_carb_pref: prefs.healthy_carb_pref || null,
+      dinners_per_week: prefs.dinners_per_week,
+      people_count: prefs.people_count,
+      updated_at: new Date().toISOString(),
     };
 
     const { error } = await supabase.from('preferences').upsert(payload, {
@@ -303,6 +312,53 @@ export default function PreferencesPage() {
               {BUDGET.map((b) => (
                 <option key={b} value={b}>
                   {b}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+                {/* Planning defaults */}
+        <div className="mb-5 flex flex-wrap gap-6">
+          <div>
+            <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
+              Dinners per week
+            </label>
+            <select
+              className={`${selectCls} w-32`}
+              value={prefs.dinners_per_week}
+              onChange={(e) =>
+                setPrefs((p) => ({
+                  ...p,
+                  dinners_per_week: Number(e.target.value),
+                }))
+              }
+            >
+              {[3, 4, 5, 6, 7].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
+              People
+            </label>
+            <select
+              className={`${selectCls} w-32`}
+              value={prefs.people_count}
+              onChange={(e) =>
+                setPrefs((p) => ({
+                  ...p,
+                  people_count: Number(e.target.value),
+                }))
+              }
+            >
+              {[1, 2, 3, 4, 5, 6].map((n) => (
+                <option key={n} value={n}>
+                  {n}
                 </option>
               ))}
             </select>

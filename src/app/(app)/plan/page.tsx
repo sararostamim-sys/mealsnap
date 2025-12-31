@@ -8,7 +8,7 @@ import type { HealthyProfile } from '@/lib/healthyProfile';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import FavoriteButton from '@/components/FavoriteButton';
 import { getDevUserId } from '@/lib/user';
-import { smartMergeNeeds, ShoppingItem, RawNeed } from '@/lib/shopping';
+import { smartMergeNeeds, ShoppingItem, RawNeed, normalizeIngredientName } from '@/lib/shopping';
 import { STORES, getPriceEstimate, StoreId } from '@/lib/pricing';
 import {
   buildInstacartUrl,
@@ -28,7 +28,7 @@ type Recipe = {
   time_min: number;
   diet_tags: string[] | null;
   instructions: string;
-
+  servings?: number | null;
   // Optional fields for richer previews (safe even if DB doesn’t have them yet)
   calories?: number | null;   // per serving
   protein_g?: number | null;  // per serving
@@ -51,6 +51,8 @@ type Prefs = {
   favorite_mode: 'variety' | 'favorites';
   healthy_whole_food: boolean;
   kid_friendly: boolean;
+  dinners_per_week: number; // 3–7
+  people_count: number;     // 1–6
   // Healthy micro-survey fields (mirroring DB)
   healthy_goal: 'feel_better' | 'weight' | 'metabolic' | '';
   healthy_protein_style: 'mixed' | 'lean_animal' | 'plant_forward' | '';
@@ -74,6 +76,8 @@ type PlanHeader = {
   id: string;
   generated_at: string;
   share_id: string | null;
+  people_count: number | null;        
+  recipe_prefs_sig: string | null;
   user_meal_plan_recipes?: PlanItem[];
 };
 
@@ -90,6 +94,8 @@ type PrefsRow = Partial<{
   healthy_protein_style: string;
   healthy_carb_pref: string;
   updated_at: string;
+  dinners_per_week: number;
+  people_count: number;
 }>;
 
 // How we present items in the UI / Notes
@@ -361,6 +367,43 @@ async function sha256Hex(input: string): Promise<string> {
   }
 }
 
+function stableSorted(arr: string[] | null | undefined) {
+  return (arr ?? []).map((x) => String(x)).sort();
+}
+
+/** Preferences that can change WHICH recipes get selected */
+function recipePrefsSignature(p: Prefs) {
+  return JSON.stringify({
+    diet: p.diet ?? 'none',
+    allergies: stableSorted(p.allergies),
+    dislikes: stableSorted(p.dislikes),
+    max_prep_minutes: p.max_prep_minutes ?? 45,
+    budget_level: p.budget_level ?? 'medium',
+    favorite_mode: p.favorite_mode ?? 'variety',
+    healthy_whole_food: !!p.healthy_whole_food,
+    kid_friendly: !!p.kid_friendly,
+    healthy_goal: p.healthy_goal ?? '',
+    healthy_protein_style: p.healthy_protein_style ?? '',
+    healthy_carb_pref: p.healthy_carb_pref ?? '',
+    dinners_per_week: p.dinners_per_week ?? 7,
+  });
+}
+
+// Group shopping items by store section (category)
+  const CATEGORY_ORDER: PantryCategory[] = [
+    'produce',
+    'protein',
+    'grains',
+    'dairy',
+    'canned',
+    'frozen',
+    'condiments',
+    'baking',
+    'snacks',
+    'beverages',
+    'other',
+  ];
+
 function PlanPageInner() {
   useRequireAuth();
 
@@ -377,7 +420,30 @@ function PlanPageInner() {
   const [ings, setIngs] = useState<Ing[]>([]);
 
   const [meals, setMeals] = useState<Recipe[]>([]);
-  const meals7 = useMemo(() => uniqueByIdLimit(meals, 7), [meals]);
+  const [planMealCount, setPlanMealCount] = useState<number>(7);
+
+    // Snapshot of prefs at the time the currently-loaded plan was generated
+  const [planRecipePrefsSig, setPlanRecipePrefsSig] = useState<string | null>(null);
+  const [planPeopleCount, setPlanPeopleCount] = useState<number | null>(null);
+
+  // NEW: user-controlled planning knobs (fallbacks are safe)
+  const dinnersPerWeek = prefs?.dinners_per_week ?? 7; // generation only
+  const peopleCount = prefs?.people_count ?? 2;
+
+  // Display count is the saved plan's size, not the preference
+  const displayCount = planMealCount || meals.length || 7;
+
+const mealsN = useMemo(
+  () => uniqueByIdLimit(meals, displayCount),
+  [meals, displayCount],
+);
+
+  const currentRecipeSig = useMemo(() => {
+    return prefs ? recipePrefsSignature(prefs) : null;
+  }, [prefs]);
+
+    const legacyPlanMissingSnapshots =
+  !!meals.length && (planPeopleCount == null || planRecipePrefsSig == null);
 
   const [shopping, setShopping] = useState<ShoppingItem[]>([]);
   const [planMeta, setPlanMeta] = useState<{
@@ -386,6 +452,34 @@ function PlanPageInner() {
   share_id?: string | null;
   } | null>(null);
   const [stale, setStale] = useState(false);
+
+  const planTs = useMemo(
+  () => (planMeta?.generated_at ? Date.parse(planMeta.generated_at) : 0),
+  [planMeta?.generated_at],
+);
+
+const pantryMax = useMemo(() => {
+  return pantry.length
+    ? Math.max(
+        ...pantry
+          .map((p) => Date.parse(p.updated_at))
+          .filter((n) => Number.isFinite(n)),
+      )
+    : 0;
+}, [pantry]);
+
+const pantryChangedSincePlan = !!planTs && pantryMax > planTs;
+
+const recipePrefsChangedSincePlan =
+  !!planRecipePrefsSig &&
+  !!currentRecipeSig &&
+  currentRecipeSig !== planRecipePrefsSig;
+
+  const peopleChangedSincePlan =
+  planPeopleCount != null && peopleCount !== planPeopleCount;
+
+  const onlyPeopleChangedSincePlan =
+  peopleChangedSincePlan && !pantryChangedSincePlan && !recipePrefsChangedSincePlan;
 
   const enablePriceHints = process.env.NEXT_PUBLIC_ENABLE_PRICE_HINTS === '1';
   const [storeId, setStoreId] = useState<StoreId>('none');
@@ -399,9 +493,9 @@ function PlanPageInner() {
     if (!id) return;
 
     // Only open if we can actually resolve this recipe in the current plan list
-    const inPlan = meals7.some((m) => m.id === id);
+    const inPlan = mealsN.some((m) => m.id === id);
     if (inPlan) setOpenId(id);
-  }, [searchParams, meals7]);
+  }, [searchParams, mealsN]);
 
   function closeRecipeModal() {
     setOpenId(null);
@@ -454,14 +548,90 @@ function PlanPageInner() {
   );
 
   /** Prefer authenticated user; fall back to .env dev id */
-  async function resolveUserId(): Promise<string> {
-    const {
-      data: { user },
-    } = await supabase.auth.getUser();
-    const uid = user?.id ?? getDevUserId();
-    setUserId(uid);
-    return uid;
-  }
+  const resolveUserId = useCallback(async (): Promise<string> => {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  const uid = user?.id ?? getDevUserId();
+  setUserId(uid);
+  return uid;
+}, []);
+
+  // Fetch latest pantry + preferences (used when returning to this page)
+const refreshPantryAndPrefs = useCallback(async () => {
+  const uid = userId ?? (await resolveUserId());
+  if (!uid) return;
+
+  const [pItems, pRes] = await Promise.all([
+    supabase
+      .from('pantry_items')
+      .select('name,updated_at,perish_by')
+      .eq('user_id', uid),
+    supabase.from('preferences').select('*').eq('user_id', uid).maybeSingle(),
+  ]);
+
+  const pantryRows: PantryRow[] = (pItems.data || []).map((x) => ({
+    name: String(x.name).toLowerCase(),
+    updated_at: x.updated_at || new Date(0).toISOString(),
+    perish_by: x.perish_by ?? null,
+  }));
+  setPantry(pantryRows);
+
+  const pr = (pRes.data ?? null) as PrefsRow | null;
+  const prefsRow: Prefs = pr
+    ? {
+        diet: pr.diet ?? 'none',
+        allergies: pr.allergies ?? [],
+        dislikes: pr.disliked_ingredients ?? [],
+        max_prep_minutes: pr.max_prep_time ?? 45,
+        budget_level: pr.budget_level ?? 'medium',
+        favorite_mode: pr.favorite_mode === 'favorites' ? 'favorites' : 'variety',
+        healthy_whole_food: pr.healthy_whole_food ?? false,
+        kid_friendly: pr.kid_friendly ?? false,
+        dinners_per_week: pr.dinners_per_week ?? 7,
+        people_count: pr.people_count ?? 2,
+        healthy_goal: (pr.healthy_goal as Prefs['healthy_goal']) ?? '',
+        healthy_protein_style: (pr.healthy_protein_style as Prefs['healthy_protein_style']) ?? '',
+        healthy_carb_pref: (pr.healthy_carb_pref as Prefs['healthy_carb_pref']) ?? '',
+        updated_at: pr.updated_at ?? undefined,
+      }
+    : {
+        diet: 'none',
+        allergies: [],
+        dislikes: [],
+        max_prep_minutes: 45,
+        budget_level: 'medium',
+        favorite_mode: 'variety',
+        healthy_whole_food: false,
+        kid_friendly: false,
+        dinners_per_week: 7,
+        people_count: 2,
+        healthy_goal: '',
+        healthy_protein_style: '',
+        healthy_carb_pref: '',
+      };
+
+  setPrefs(prefsRow);
+}, [userId, resolveUserId]);
+
+// When user returns to the tab/page, refresh prefs so stale banner is accurate
+useEffect(() => {
+  const onFocus = () => {
+    void refreshPantryAndPrefs();
+  };
+
+  window.addEventListener('focus', onFocus);
+
+  const onVis = () => {
+    if (document.visibilityState === 'visible') onFocus();
+  };
+  document.addEventListener('visibilitychange', onVis);
+
+  return () => {
+    window.removeEventListener('focus', onFocus);
+    document.removeEventListener('visibilitychange', onVis);
+  };
+}, [refreshPantryAndPrefs]);
 
   // Build an index of ingredients by recipe for quick lookups
   const ingByRecipe = useMemo(() => {
@@ -489,33 +659,43 @@ function PlanPageInner() {
   // Recompute shopping list from chosen meals + current pantry (Smart List v1)
   const recomputeShopping = useCallback(
     (chosen: Recipe[]) => {
-      const pantrySet = new Set(pantry.map((p) => p.name.toLowerCase()));
+      const pantrySet = new Set(pantry.map((p) => normalizeIngredientName(p.name)));
       const rawNeeds: RawNeed[] = [];
 
       for (const r of chosen) {
-        const ri = ingByRecipe.get(r.id) || [];
-        for (const it of ri) {
-          const nameLower = it.name.toLowerCase();
-          if (pantrySet.has(nameLower)) continue;
+  const ri = ingByRecipe.get(r.id) || [];
 
-          rawNeeds.push({
-            name: it.name,
-            qty: it.qty ?? 1,
-            unit: it.unit ?? 'unit',
-          });
-        }
-      }
+  const baseServings = r.servings ?? 2; // DB default is 2; keep safe fallback
+  const multiplier = baseServings > 0 ? peopleCount / baseServings : 1;
+
+  for (const it of ri) {
+    const ingNorm = normalizeIngredientName(it.name);
+    if (pantrySet.has(ingNorm)) continue;
+
+    // Staples and garnish: we decided to exclude optional items from shopping list
+    if (it.optional) continue;
+
+    const baseQty = it.qty ?? 1;
+    const scaledQty = baseQty * multiplier;
+
+    rawNeeds.push({
+      name: it.name,
+      qty: scaledQty,
+      unit: it.unit ?? 'unit',
+    });
+  }
+}
 
       const merged = smartMergeNeeds(rawNeeds);
       setShopping(merged);
     },
-    [ingByRecipe, pantry],
+    [ingByRecipe, pantry, peopleCount],
   );
 
   // Keep shopping list in sync when meals or ingredients change
   useEffect(() => {
-    if (meals7.length) recomputeShopping(meals7);
-  }, [meals7, recomputeShopping]);
+    if (mealsN.length) recomputeShopping(mealsN);
+  }, [mealsN, recomputeShopping]);
 
   // Initial load: user + pantry/prefs/recipes/ings + latest saved plan
   useEffect(() => {
@@ -531,7 +711,7 @@ function PlanPageInner() {
         supabase.from('preferences').select('*').eq('user_id', uid).maybeSingle(),
         supabase
           .from('recipes')
-          .select('id,title,time_min,diet_tags,instructions'),
+          .select('id,title,time_min,diet_tags,instructions,servings'),
         supabase
           .from('recipe_ingredients')
           .select('recipe_id,name,qty,unit,optional'),
@@ -558,6 +738,8 @@ function PlanPageInner() {
               pr.favorite_mode === 'favorites' ? 'favorites' : 'variety',
             healthy_whole_food: pr.healthy_whole_food ?? false,
             kid_friendly: pr.kid_friendly ?? false,
+            dinners_per_week: pr.dinners_per_week ?? 7,
+            people_count: pr.people_count ?? 2,
             healthy_goal: (pr.healthy_goal as Prefs['healthy_goal']) ?? '',
             healthy_protein_style:
               (pr.healthy_protein_style as Prefs['healthy_protein_style']) ?? '',
@@ -574,6 +756,8 @@ function PlanPageInner() {
             favorite_mode: 'variety',
             healthy_whole_food: false,
             kid_friendly: false,
+            dinners_per_week: 7,
+            people_count: 2,
             healthy_goal: '',
             healthy_protein_style: '',
             healthy_carb_pref: '',
@@ -593,7 +777,7 @@ function PlanPageInner() {
       // Load latest saved plan (+ items) for this user
       const { data: plan } = await supabase
         .from('user_meal_plan')
-        .select('id, generated_at, share_id, user_meal_plan_recipes (recipe_id, position)')
+        .select('id, generated_at, share_id, people_count, recipe_prefs_sig, user_meal_plan_recipes (recipe_id, position)')
         .eq('user_id', uid)
         .order('generated_at', { ascending: false })
         .limit(1)
@@ -602,28 +786,31 @@ function PlanPageInner() {
       if (plan) {
         const byId = new Map(recipeRows.map((r) => [r.id, r]));
         const items = (plan.user_meal_plan_recipes || [])
-          .slice()
-          .sort((a, b) => a.position - b.position);
-        const chosen = items
-          .map((it) => byId.get(it.recipe_id))
-          .filter(Boolean) as Recipe[];
-        setMeals(chosen);
-        setPlanMeta({ id: plan.id, generated_at: plan.generated_at, share_id: plan.share_id ?? null });
+       .slice()
+       .sort((a, b) => a.position - b.position);
 
-        // Staleness: if pantry/prefs changed after plan.generated_at
-        const pantryMax = pantryRows.length
-          ? Math.max(...pantryRows.map((p) => Date.parse(p.updated_at)))
-          : 0;
-        const prefsUpdated = prefsRow.updated_at
-          ? Date.parse(prefsRow.updated_at)
-          : 0;
-        const planTs = Date.parse(plan.generated_at);
-        setStale(pantryMax > planTs || prefsUpdated > planTs);
-      }
+       const chosen = items
+       .map((it) => byId.get(it.recipe_id))
+       .filter(Boolean) as Recipe[];
+
+       setMeals(chosen);
+       setPlanMealCount(chosen.length || 7);
+       setPlanMeta({ id: plan.id, generated_at: plan.generated_at, share_id: plan.share_id ?? null });
+       // Snapshot prefs used for this plan (stored on the plan row)
+       setPlanRecipePrefsSig(plan.recipe_prefs_sig ?? null);
+       setPlanPeopleCount(plan.people_count ?? null);
+
+       }
 
       setLoading(false);
     })();
-  }, []);
+  }, [resolveUserId]);
+
+  // Recompute stale whenever pantry/prefs change (Plan page may stay mounted when navigating)
+  useEffect(() => {
+  if (!planMeta?.generated_at) return;
+  setStale(pantryChangedSincePlan || recipePrefsChangedSincePlan);
+}, [planMeta?.generated_at, pantryChangedSincePlan, recipePrefsChangedSincePlan]);
 
   // Load healthy micro-survey answers (if any) from localStorage
   useEffect(() => {
@@ -710,7 +897,7 @@ function PlanPageInner() {
 
     const allergy = expandAllergyTerms(prefs.allergies || []);
     const dislike = new Set((prefs.dislikes || []).map((d) => d.toLowerCase()));    
-    const pantrySet = new Set(pantry.map((p) => p.name));
+    const pantrySet = new Set(pantry.map((p) => normalizeIngredientName(p.name)));
 
     // Build ingredient index (same as before)
     const ingIndex = new Map<string, Ing[]>();
@@ -790,11 +977,11 @@ function PlanPageInner() {
         title: r.title,
         time_min: r.time_min,
         diet_tags: r.diet_tags,
-        ingredients: (ingIndex.get(r.id) || []).map((it) =>
-          it.name.toLowerCase(),
-        ),
+        ingredients: (ingIndex.get(r.id) || [])
+       .filter((it) => !it.optional) // optional shouldn’t drive planning
+       .map((it) => normalizeIngredientName(it.name)),
         is_favorite: favorites.has(r.id),
-      }));
+          }));
 
             // Build the exact payload we send to /api/llm-plan (so the key is meaningful)
       const llmPayload = {
@@ -813,7 +1000,7 @@ function PlanPageInner() {
           // healthy_carb_pref: prefs.healthy_carb_pref,
         },
         recipes: recipeLite,
-        days: 7,
+        days: dinnersPerWeek,
         healthyProfile, // may be undefined
       };
 
@@ -848,7 +1035,7 @@ function PlanPageInner() {
    //            healthy_carb_pref: prefs.healthy_carb_pref,
           },
           recipes: recipeLite,
-          days: 7,
+          days: dinnersPerWeek,
           healthyProfile, // may be undefined → omitted on JSON.stringify
         }),
       });
@@ -910,11 +1097,14 @@ function PlanPageInner() {
 
           // 3) Pantry usage / avoid allergens / dislikes
           for (const it of ri) {
-            const name = it.name.toLowerCase();
-            if (pantrySet.has(name)) score += 1;
-            if (allergy.has(name)) return { r, score: -999, ri };
-            if (dislike.has(name)) score -= 2;
-          }
+         const ingNorm = normalizeIngredientName(it.name);
+
+         if (pantrySet.has(ingNorm)) score += 1;
+
+         // allergy/dislike matching should also use normalized checks
+         if (hasAnyTerm(it.name, allergy)) return { r, score: -999, ri };
+         if (hasAnyTerm(it.name, dislike)) score -= 2;
+         }
 
           // 4) Favorites weighting
           if (favorites.has(r.id)) {
@@ -926,7 +1116,7 @@ function PlanPageInner() {
         .filter((x) => x.score > -500)
         .sort((a, b) => b.score - a.score);
 
-      const fallbackChosen = scored.slice(0, 7).map((x) => x.r);
+      const fallbackChosen = scored.slice(0, dinnersPerWeek).map((x) => x.r);
       chosen = fallbackChosen;
       setPlannerMode('heuristic');
       mode = 'heuristic';
@@ -965,10 +1155,13 @@ function PlanPageInner() {
     chosen = withPerishableScore.map((x) => x.recipe);
 
     // Ensure we always save exactly 7 unique recipes (defensive against LLM duplicates / over-return)
-   chosen = uniqueByIdLimit(chosen, 7);
+   chosen = uniqueByIdLimit(chosen, dinnersPerWeek);
 
-   if (chosen.length < 7) {
-   console.warn('[PLAN] Fewer than 7 unique recipes after filtering/dedupe:', chosen.length);
+   if (chosen.length < dinnersPerWeek) {
+   console.warn(
+   `[PLAN] Fewer than ${dinnersPerWeek} unique recipes after filtering/dedupe:`,
+   chosen.length,
+   );
    }
 
     // ---------- 3) Persist to Supabase ----------
@@ -977,15 +1170,25 @@ function PlanPageInner() {
     ? crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
-   const { data: planRow, error: planErr } = await supabase
-   .from('user_meal_plan')
-   .insert({ user_id: userId, share_id: newShareId })
-   .select('id,generated_at,share_id')
-   .single();
+   const prefsSigAtGen = prefs ? recipePrefsSignature(prefs) : null;
+
+const { data: planRow, error: planErr } = await supabase
+  .from('user_meal_plan')
+  .insert({
+    user_id: userId,
+    share_id: newShareId,
+    people_count: peopleCount,          // NEW
+    recipe_prefs_sig: prefsSigAtGen,    // NEW
+  })
+  .select('id,generated_at,share_id,people_count,recipe_prefs_sig')
+  .single();
     if (planErr || !planRow) {
       console.error(planErr);
       return;
     }
+
+    setPlanRecipePrefsSig(planRow.recipe_prefs_sig ?? prefsSigAtGen);
+    setPlanPeopleCount(planRow.people_count ?? peopleCount);
 
     const itemsPayload = chosen.map((r, idx) => ({
       plan_id: planRow.id,
@@ -1001,9 +1204,10 @@ function PlanPageInner() {
     }
 
     setMeals(chosen);
-    setPlanMeta({ id: planRow.id, generated_at: planRow.generated_at, share_id: planRow.share_id ?? null });
-    setStale(false);
-    recomputeShopping(chosen);
+   setPlanMealCount(chosen.length || dinnersPerWeek); // ✅ critical: update display count immediately
+   setPlanMeta({ id: planRow.id, generated_at: planRow.generated_at, share_id: planRow.share_id ?? null });
+   setStale(false);
+   recomputeShopping(chosen);
     trackEvent('generate_plan_success', {
     plan_id: planRow.id,
     share_id: planRow.share_id ?? null,
@@ -1023,7 +1227,50 @@ function PlanPageInner() {
     recomputeShopping,
     favorites,
     healthySurvey,
+    dinnersPerWeek,
+    peopleCount,
   ]);
+
+ const updateServingsOnly = useCallback(async () => {
+  if (!mealsN.length) return;
+  if (!planMeta?.id) {
+    console.warn('[PLAN] updateServingsOnly: missing planMeta.id');
+    return;
+  }
+
+  // 1) Recompute shopping immediately for UX
+  recomputeShopping(mealsN);
+
+  // 2) Persist the new people_count onto the plan row (this fixes logout/login banner)
+  const { data, error } = await supabase
+    .from('user_meal_plan')
+    .update({ people_count: peopleCount })
+    .eq('id', planMeta.id)
+    .select('id, people_count')
+    .maybeSingle();
+
+  if (error) {
+    console.error('[PLAN] Update servings failed:', error);
+    alert(`Update servings failed: ${error.message}`);
+    return;
+  }
+  if (!data) {
+    console.error('[PLAN] Update servings failed: 0 rows updated (RLS or wrong plan id)');
+    alert('Update servings failed (0 rows updated). This is usually an RLS policy issue.');
+    return;
+  }
+
+  console.log('[PLAN] Updated servings persisted:', data);
+
+  // 3) Sync local snapshot to match DB (so no “people changed” banner)
+  setPlanPeopleCount(data.people_count ?? peopleCount);
+  setStale(false);
+
+  trackEvent('update_servings_only', {
+    plan_id: planMeta.id,
+    people_count: peopleCount,
+  });
+}, [mealsN, recomputeShopping, peopleCount, planMeta?.id]);
 
   function downloadCSV() {
     const header = 'name,qty,unit';
@@ -1132,39 +1379,26 @@ function PlanPageInner() {
   const showFavoritesBadge =
     hasFavoriteInPlan && !stale && prefs?.favorite_mode === 'favorites';
 
-  // Group shopping items by store section (category)
-  const CATEGORY_ORDER: PantryCategory[] = [
-    'produce',
-    'protein',
-    'grains',
-    'dairy',
-    'canned',
-    'frozen',
-    'condiments',
-    'baking',
-    'snacks',
-    'beverages',
-    'other',
-  ];
-
+  const groupedShopping = useMemo(() => {
   const itemsByCategory = new Map<
     PantryCategory,
     (typeof pricedShopping)[number][]
   >();
 
-  pricedShopping.forEach((it) => {
+  for (const it of pricedShopping) {
     const cat = (it.category ?? 'other') as PantryCategory;
     const arr = itemsByCategory.get(cat) || [];
     arr.push(it);
     itemsByCategory.set(cat, arr);
-  });
+  }
 
-  const groupedShopping = CATEGORY_ORDER
+  return CATEGORY_ORDER
     .map((cat) => ({
       category: cat,
       items: itemsByCategory.get(cat) ?? [],
     }))
     .filter((g) => g.items.length > 0);
+}, [pricedShopping]);
 
   // For header colSpan in the table (3 base cols + optional)
   const shoppingColCount =
@@ -1172,9 +1406,45 @@ function PlanPageInner() {
     (enablePriceHints && storeId !== 'none' ? 1 : 0) +
     (shopPlatform !== 'none' ? 1 : 0);
 
+    useEffect(() => {
+  if (!planMeta?.id) return;
+
+  console.log('[PLAN DEBUG]', {
+    plan_id: planMeta.id,
+    plan_generated_at: planMeta.generated_at,
+    plan_people_count: planPeopleCount,
+    plan_recipe_sig_present: planRecipePrefsSig != null,
+
+    prefs_loaded: prefs != null,
+    prefs_people_count: prefs?.people_count,
+    prefs_updated_at: prefs?.updated_at,
+
+    pantry_len: pantry.length,
+
+    stale,
+    pantryChangedSincePlan,
+    recipePrefsChangedSincePlan,
+    // ⚠️ see note below about peopleChangedSincePlan
+    onlyPeopleChangedSincePlan,
+    legacyPlanMissingSnapshots,
+  });
+}, [
+  planMeta?.id,
+  planMeta?.generated_at,
+  planPeopleCount,
+  planRecipePrefsSig,
+  prefs,
+  pantry.length,
+  stale,
+  pantryChangedSincePlan,
+  recipePrefsChangedSincePlan,
+  onlyPeopleChangedSincePlan,
+  legacyPlanMissingSnapshots,
+]);
+
   if (loading) return <p className="max-w-3xl mx-auto">Loading…</p>;
 
-  const openRecipe = meals7.find((m) => m.id === openId) || null;
+  const openRecipe = mealsN.find((m) => m.id === openId) || null;
   const openIngs = openId ? ingByRecipe.get(openId) || [] : [];
   const generatedLabel = planMeta
     ? new Date(planMeta.generated_at).toLocaleString()
@@ -1238,7 +1508,7 @@ const allergyHits: string[] = (() => {
           {/* LEFT: title only */}
           <div className="flex-1 min-w-0">
             <h1 className="text-2xl font-semibold text-gray-900 dark:text-gray-100">
-              Your 7-Day Plan
+              Your {mealsN.length}-Dinner Plan
             </h1>
           </div>
 
@@ -1260,14 +1530,28 @@ const allergyHits: string[] = (() => {
           {/* RIGHT: regenerate button */}
         <div className="flex-shrink-0 pt-[2px]">
   <button
-    onClick={generateAndSave}
-    disabled={generating}
-    className={`rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black ${
-      generating ? 'opacity-50 cursor-not-allowed' : ''
-    }`}
-  >
-    {generating ? 'Generating…' : meals.length ? 'Regenerate plan' : 'Generate plan'}
-  </button>
+  onClick={
+  legacyPlanMissingSnapshots
+    ? generateAndSave
+    : onlyPeopleChangedSincePlan
+    ? updateServingsOnly
+    : generateAndSave
+}
+  disabled={generating}
+  className={`rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black ${
+    generating ? 'opacity-50 cursor-not-allowed' : ''
+  }`}
+>
+  {generating
+  ? 'Generating…'
+  : !meals.length
+  ? 'Generate plan'
+  : legacyPlanMissingSnapshots
+  ? 'Regenerate plan'
+  : onlyPeopleChangedSincePlan
+  ? 'Update servings'
+  : 'Regenerate plan'}
+</button>
 </div>
         </div>
 
@@ -1342,9 +1626,21 @@ const allergyHits: string[] = (() => {
         {stale && (
           <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-sm dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100">
             Your pantry or preferences changed since this plan was created.
-            <span className="ml-2 font-medium">Regenerate to refresh.</span>
+            <span className="ml-2 font-medium">Regenerate to apply your latest settings.</span>
           </div>
         )}
+        {!stale && legacyPlanMissingSnapshots && (
+        <div className="mt-3 rounded-md border border-amber-300 bg-amber-50 text-amber-900 px-3 py-2 text-sm dark:border-amber-400 dark:bg-amber-950 dark:text-amber-100">
+         This is an older plan. Regenerate once to enable servings-only updates.
+          </div>
+         )}
+        {/* Servings-only change (recipes still valid) */}
+        {!stale && !legacyPlanMissingSnapshots && onlyPeopleChangedSincePlan && (
+        <div className="mt-3 rounded-md border border-blue-200 bg-blue-50 text-blue-900 px-3 py-2 text-sm dark:border-blue-400/40 dark:bg-blue-950 dark:text-blue-100">
+        Your servings preference changed to {peopleCount}. Click{' '}
+        <span className="font-medium">Update servings</span> to scale the shopping list.
+        </div>
+       )}
       </div>
 
       {/* Meals + shopping card */}
@@ -1354,7 +1650,7 @@ const allergyHits: string[] = (() => {
             Meals
           </h2>
           <div className="grid md:grid-cols-2 gap-4">
-            {meals7.map((m) => (
+            {mealsN.map((m) => (
               <div
                 key={m.id}
                 className="border rounded p-3 border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900"

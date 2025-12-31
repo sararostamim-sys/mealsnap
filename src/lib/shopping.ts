@@ -17,7 +17,7 @@ export type ShoppingItem = {
 
 /** ---------- Name normalization ---------- */
 
-function normalizeName(raw: string): string {
+export function normalizeIngredientName(raw: string): string {
   let s = (raw || '').toLowerCase().trim();
 
   // Drop stuff in parentheses and after commas: "onion, chopped" → "onion"
@@ -232,7 +232,7 @@ export function smartMergeNeeds(needs: RawNeed[]): ShoppingItem[] {
     const rawName = (n.name || '').trim();
     if (!rawName) continue;
 
-    const name = normalizeName(rawName);
+    const name = normalizeIngredientName(rawName);
     const unitNorm = normalizeUnit(n.unit ?? '');
     const qtyNum = Number(n.qty ?? 1) || 1;
 
