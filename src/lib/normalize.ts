@@ -78,7 +78,7 @@ export function cleanOcrText(text: string): string {
   preFixes.forEach(([re, rep]) => (out = out.replace(re, rep)));
 
   out = out
-    .replace(/[^a-zA-Z0-9&().,'’”“\-\/\s]/g, ' ')
+    .replace(/[^a-zA-Z0-9&().,'’”“\-/\s]/g, ' ')
     .replace(/[“”„‟]/g, '"')
     .replace(/[‘’‚‛]/g, "'")
     .replace(/\s+/g, ' ')

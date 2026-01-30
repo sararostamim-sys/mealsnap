@@ -21,6 +21,7 @@ import { prettyCategoryLabel } from '@/lib/pantryCategorizer';
 import React, { Fragment, Suspense } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { trackEvent } from '@/lib/analytics';
+import Modal from '@/components/Modal';
 
 type Recipe = {
   id: string;
@@ -67,6 +68,30 @@ type HealthySurvey = {
 };
 
 const HEALTHY_SURVEY_KEY = 'mc_healthy_survey_v1';
+
+  // Pantry staples we don’t want to show in the shopping list
+const STAPLE_SKIP = new Set([
+  'salt',
+  'kosher salt',
+  'sea salt',
+
+  'black pepper',
+  'pepper',
+
+  'olive oil',
+  'cooking oil',
+  'vegetable oil',
+  'canola oil',
+  'avocado oil',
+
+  // optional: common spices
+  'cumin',
+  'paprika',
+  'chili powder',
+  'garlic powder',
+  'onion powder',
+  'red pepper flake',
+]);
 
 type PantryRow = { name: string; updated_at: string; perish_by: string | null };
 
@@ -336,16 +361,37 @@ function getHealthSwapHintForItem(
   return null;
 }
 
-function uniqueByIdLimit(recipes: Recipe[], limit: number): Recipe[] {
-  const seen = new Set<string>();
-  const out: Recipe[] = [];
+function hashStringToInt(s: string): number {
+  // Deterministic small hash (no crypto needed)
+  let h = 0;
+  for (let i = 0; i < s.length; i++) {
+    h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return h;
+}
 
-  for (const r of recipes) {
-    if (!r?.id) continue;
-    if (seen.has(r.id)) continue;
-    seen.add(r.id);
-    out.push(r);
-    if (out.length >= limit) break;
+function fillPlanWithRepeats(
+  base: Recipe[],
+  target: number,
+  strictPool: Recipe[],
+  seed: string,
+): Recipe[] {
+  const out = base.slice(0, target);
+  if (out.length >= target) return out;
+
+  const pool = (strictPool || []).filter((r) => !!r?.id);
+  if (!pool.length) return out; // nothing we can do
+
+  // Stable order for deterministic cycling
+  const poolSorted = pool.slice().sort((a, b) => a.id.localeCompare(b.id));
+  const start = hashStringToInt(seed) % poolSorted.length;
+
+  let i = 0;
+  while (out.length < target) {
+    out.push(poolSorted[(start + i) % poolSorted.length]);
+    i++;
+    // defensive guard (should never hit)
+    if (i > target * 10) break;
   }
 
   return out;
@@ -394,10 +440,12 @@ function recipePrefsSignature(p: Prefs) {
     'produce',
     'protein',
     'grains',
+    'legumes',
     'dairy',
     'canned',
     'frozen',
     'condiments',
+    'spices',
     'baking',
     'snacks',
     'beverages',
@@ -433,10 +481,10 @@ function PlanPageInner() {
   // Display count is the saved plan's size, not the preference
   const displayCount = planMealCount || meals.length || 7;
 
-const mealsN = useMemo(
-  () => uniqueByIdLimit(meals, displayCount),
-  [meals, displayCount],
-);
+const mealsN = useMemo(() => {
+  // IMPORTANT: do NOT de-dupe here — repeats are allowed to hit dinnersPerWeek
+  return (meals || []).slice(0, displayCount).filter(Boolean);
+}, [meals, displayCount]);
 
   const currentRecipeSig = useMemo(() => {
     return prefs ? recipePrefsSignature(prefs) : null;
@@ -670,10 +718,13 @@ useEffect(() => {
 
   for (const it of ri) {
     const ingNorm = normalizeIngredientName(it.name);
-    if (pantrySet.has(ingNorm)) continue;
+   if (pantrySet.has(ingNorm)) continue;
+
+    // Skip pantry staples (salt/pepper etc.)
+   if (STAPLE_SKIP.has(ingNorm)) continue;
 
     // Staples and garnish: we decided to exclude optional items from shopping list
-    if (it.optional) continue;
+   if (it.optional) continue;
 
     const baseQty = it.qty ?? 1;
     const scaledQty = baseQty * multiplier;
@@ -681,7 +732,7 @@ useEffect(() => {
     rawNeeds.push({
       name: it.name,
       qty: scaledQty,
-      unit: it.unit ?? 'unit',
+      unit: it.unit ?? null,
     });
   }
 }
@@ -711,7 +762,8 @@ useEffect(() => {
         supabase.from('preferences').select('*').eq('user_id', uid).maybeSingle(),
         supabase
           .from('recipes')
-          .select('id,title,time_min,diet_tags,instructions,servings'),
+          .select('id,title,time_min,diet_tags,instructions,servings')
+          .eq('is_active', true),
         supabase
           .from('recipe_ingredients')
           .select('recipe_id,name,qty,unit,optional'),
@@ -966,8 +1018,11 @@ useEffect(() => {
       );
     }
 
+    const strictPool: Recipe[] = pool; // strict-only: never relax constraints
+
     let chosen: Recipe[] | null = null;
     let mode: 'llm' | 'heuristic' | null = null;
+    let reqKey: string | null = null;
 
     try {
       const pantryNames = Array.from(pantrySet);
@@ -1005,7 +1060,7 @@ useEffect(() => {
       };
 
       // Skip identical inputs if user clicks regenerate repeatedly (prevents extra API calls + extra saved plans)
-      const reqKey = await sha256Hex(JSON.stringify(llmPayload));
+      reqKey = await sha256Hex(JSON.stringify(llmPayload));
       const nowTs = Date.now();
       const tooSoonMs = 30_000; // 30 seconds (tunable)
       if (
@@ -1154,13 +1209,19 @@ useEffect(() => {
     withPerishableScore.sort((a, b) => b.perishability - a.perishability);
     chosen = withPerishableScore.map((x) => x.recipe);
 
-    // Ensure we always save exactly 7 unique recipes (defensive against LLM duplicates / over-return)
-   chosen = uniqueByIdLimit(chosen, dinnersPerWeek);
+    // Ensure we always save exactly dinnersPerWeek meals.
+   // Repeats are allowed, but ONLY from the strict pool (no constraint relaxing).
+   chosen = (chosen || []).slice(0, dinnersPerWeek);
 
-   if (chosen.length < dinnersPerWeek) {
+    if (chosen.length < dinnersPerWeek) {
+   const seed =
+  reqKey ??
+  `${userId}|${recipePrefsSignature(prefs)}|${dinnersPerWeek}`;
+   chosen = fillPlanWithRepeats(chosen, dinnersPerWeek, strictPool, seed);
+
    console.warn(
-   `[PLAN] Fewer than ${dinnersPerWeek} unique recipes after filtering/dedupe:`,
-   chosen.length,
+    `[PLAN] Filled plan with repeats to reach ${dinnersPerWeek} meals. Final length:`,
+    chosen.length,
    );
    }
 
@@ -1369,15 +1430,7 @@ const { data: planRow, error: planErr } = await supabase
   }
 }
 
-  // NEW: does this plan include at least one favorite?
-  const hasFavoriteInPlan = useMemo(() => {
-    if (!favorites || favorites.size === 0 || meals.length === 0) return false;
-    return meals.some((m) => favorites.has(m.id));
-  }, [meals, favorites]);
-
-  // NEW: should we show the favorites badge at all?
-  const showFavoritesBadge =
-    hasFavoriteInPlan && !stale && prefs?.favorite_mode === 'favorites';
+  const showHealthyBadge = !!prefs?.healthy_whole_food && !stale;
 
   const groupedShopping = useMemo(() => {
   const itemsByCategory = new Map<
@@ -1520,11 +1573,11 @@ const allergyHits: string[] = (() => {
               </div>
             )}
 
-            {showFavoritesBadge && (
-              <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200">
-                ⭐ Prioritized your favorites
-              </div>
-            )}
+            {showHealthyBadge && (
+            <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200">
+            Focused on balanced, whole-food meals
+           </div>
+           )}
           </div>
 
           {/* RIGHT: regenerate button */}
@@ -1650,9 +1703,9 @@ const allergyHits: string[] = (() => {
             Meals
           </h2>
           <div className="grid md:grid-cols-2 gap-4">
-            {mealsN.map((m) => (
-              <div
-                key={m.id}
+            {mealsN.map((m, idx) => (
+           <div
+            key={`${m.id}-${idx}`}
                 className="border rounded p-3 border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900"
               >
                 <div className="flex items-start justify-between">
@@ -1822,7 +1875,11 @@ const allergyHits: string[] = (() => {
       )}
 
       {/* Modal */}
-      <Modal open={!!openId} onClose={closeRecipeModal}>
+      <Modal
+  open={!!openId}
+  onClose={closeRecipeModal}
+  title={openRecipe?.title ?? 'Recipe'}
+>
                 {openRecipe ? (
           <div>
             <div className="flex items-start justify-between">
@@ -1910,15 +1967,6 @@ const allergyHits: string[] = (() => {
             <p className="whitespace-pre-wrap leading-relaxed">
               {openRecipe.instructions}
             </p>
-
-            <div className="mt-4 text-right">
-              <button
-                onClick={closeRecipeModal}
-                className="rounded border px-4 py-2 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-neutral-800"
-              >
-                Close
-              </button>
-            </div>
           </div>
         ) : null}
       </Modal>
@@ -1931,34 +1979,5 @@ export default function PlanPage() {
     <Suspense fallback={<p className="max-w-3xl mx-auto">Loading…</p>}>
       <PlanPageInner />
     </Suspense>
-  );
-}
-
-/** Simple modal component */
-function Modal({
-  open,
-  onClose,
-  children,
-}: {
-  open: boolean;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50">
-      {/* backdrop */}
-      <div
-        className="absolute inset-0 bg-black/40"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      {/* dialog */}
-      <div className="absolute inset-0 flex items-start justify-center mt-16 px-4">
-        <div className="w-full max-w-2xl rounded-lg bg-white dark:bg-neutral-900 p-6 shadow-lg border border-gray-200 dark:border-gray-800">
-          {children}
-        </div>
-      </div>
-    </div>
   );
 }

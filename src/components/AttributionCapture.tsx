@@ -25,7 +25,9 @@ export function AttributionCapture() {
       };
 
       localStorage.setItem(KEY, JSON.stringify(attrib));
-    } catch {}
+    } catch {
+      // Attribution capture is non-critical; fail silently
+    }
   }, []);
 
   return null;

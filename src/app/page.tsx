@@ -16,11 +16,9 @@ export default function Home() {
 
         <p className="mt-8 text-lg leading-relaxed
                       text-gray-600 dark:text-gray-400">
-          <span className="font-semibold">Our mission:</span> make everyday
-          cooking effortless by turning what’s already in your pantry into
-          delicious, practical meals. We help you track ingredients, discover
-          smart recipes, and cut food waste—so you save time, money, and
-          headspace.
+          Make everyday cooking effortless by turning what’s already in your
+          kitchen into healthy, practical meals — with a shopping list that
+          avoids duplicates, reduces waste, and saves you decisions.
         </p>
 
         <div className="mt-10">

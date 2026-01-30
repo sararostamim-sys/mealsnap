@@ -2,24 +2,24 @@
   "name": "mealcue",
   "version": "0.1.0",
   "private": true,
- "scripts": {
-  "dev": "next dev",
-  "build": "NODE_ENV=production next build --webpack",
-  "start": "next start",
-  "lint": "eslint . --ext .ts,.tsx --max-warnings=0",
-  "typecheck": "tsc --noEmit"
-},
+  "scripts": {
+    "dev": "next dev",
+    "build": "NODE_ENV=production next build --webpack",
+    "start": "next start",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "@google-cloud/vision": "^5.3.4",
     "@supabase/supabase-js": "^2.75.0",
     "@vercel/analytics": "^1.5.0",
     "@vercel/speed-insights": "^1.2.0",
     "@zxing/browser": "^0.1.5",
-    "@zxing/library": "^0.20.0",
+    "@zxing/library": "^0.21.3",
     "date-fns": "^4.1.0",
     "fuse.js": "^7.1.0",
     "heic-convert": "^2.1.0",
-    "next": "16.0.7",
+    "next": "16.1.6",
     "react": "19.2.1",
     "react-dom": "19.2.1",
     "sharp": "^0.34.4",
@@ -29,15 +29,21 @@
     "zod": "^4.1.12"
   },
   "devDependencies": {
-    "@eslint/eslintrc": "^3",
+    "@eslint/js": "^9.39.2",
+    "@next/eslint-plugin-next": "^16.1.6",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "baseline-browser-mapping": "^2.9.19",
     "eslint": "^9",
-    "eslint-config-next": "15.5.4",
+    "eslint-config-next": "16.1.6",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "globals": "^17.2.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "typescript-eslint": "^8.54.0"
   },
   "engines": {
     "node": ">=20 <=22"

@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import FavoriteButton from '@/components/FavoriteButton';
+import Modal from '@/components/Modal';
 
 type Recipe = {
   id: string;
@@ -55,14 +56,32 @@ export default function FavoritesPage() {
       }
 
       // 2) fetch recipe details + ingredients (same fields used on Plan)
-      const [{ data: rRes }, { data: iRes }] = await Promise.all([
-        supabase.from('recipes')
-          .select('id,title,time_min,diet_tags,instructions')
-          .in('id', ids),
-        supabase.from('recipe_ingredients')
-          .select('recipe_id,name,qty,unit,optional')
-          .in('recipe_id', ids),
-      ]);
+      const { data: rRes, error: rErr } = await supabase
+  .from('recipes')
+  .select('id,title,time_min,diet_tags,instructions')
+  .in('id', ids)
+  .eq('is_active', true);
+
+if (rErr) {
+  console.error(rErr);
+  setRecipes([]);
+  setIngs([]);
+  setLoading(false);
+  return;
+}
+
+const activeIds = (rRes ?? []).map(r => r.id);
+
+const { data: iRes, error: iErr } = await supabase
+  .from('recipe_ingredients')
+  .select('recipe_id,name,qty,unit,optional')
+  .in('recipe_id', activeIds);
+
+if (iErr) console.error(iErr);
+
+setRecipes(rRes || []);
+setIngs(iRes || []);
+setLoading(false);
 
       setRecipes(rRes || []);
       setIngs(iRes || []);
@@ -121,7 +140,11 @@ export default function FavoritesPage() {
       </div>
 
       {/* Modal (same look/feel as Plan) */}
-      <Modal open={!!openId} onClose={() => setOpenId(null)}>
+      <Modal
+  open={!!openId}
+  onClose={() => setOpenId(null)}
+  title={openRecipe?.title ?? 'Recipe'}
+>
         {openRecipe ? (
           <div>
             {/* Modal header with favorite */}
@@ -146,47 +169,9 @@ export default function FavoritesPage() {
 
             <h4 className="font-medium mt-4 mb-1">Instructions</h4>
             <p className="whitespace-pre-wrap leading-relaxed">{openRecipe.instructions}</p>
-
-            <div className="mt-4 text-right">
-              <button
-                onClick={() => setOpenId(null)}
-                className="rounded border px-4 py-2 border-gray-200 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-neutral-800"
-              >
-                Close
-              </button>
-            </div>
           </div>
         ) : null}
       </Modal>
-    </div>
-  );
-}
-
-/** Simple modal component (aligned with Plan) */
-function Modal({
-  open,
-  onClose,
-  children,
-}: {
-  open: boolean;
-  onClose: () => void;
-  children: React.ReactNode;
-}) {
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50">
-      {/* backdrop */}
-      <div
-        className="absolute inset-0 bg-black/40"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      {/* dialog */}
-      <div className="absolute inset-0 flex items-start justify-center mt-16 px-4">
-        <div className="w-full max-w-2xl rounded-lg bg-white dark:bg-neutral-900 p-6 shadow-lg border border-gray-200 dark:border-gray-800">
-          {children}
-        </div>
-      </div>
     </div>
   );
 }
