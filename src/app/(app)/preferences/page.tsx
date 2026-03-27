@@ -1,6 +1,7 @@
 // src/app/preferences/page.tsx
 'use client';
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { supabase } from '@/lib/supabase';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import { getDevUserId } from '@/lib/user';
@@ -11,7 +12,6 @@ type Prefs = {
   allergies: string[];
   dislikes: string[];
   max_prep_minutes: number;
-  budget_level: string;
   favorite_mode: 'variety' | 'favorites';
   healthy_whole_food: boolean;
   kid_friendly: boolean;
@@ -30,7 +30,31 @@ type HealthySurvey = {
 };
 
 const DIETS = ['none', 'vegetarian', 'vegan', 'gluten_free', 'halal', 'kosher'] as const;
-const BUDGET = ['low', 'medium', 'high'] as const;
+
+// Research-backed toggles:
+// Allergies: FDA “major food allergens” (Top 9 in the U.S.)
+// Dislikes: high-signal common dislikes (broad + kid/family relevant)
+const ALLERGY_OPTIONS: { value: string; label: string }[] = [
+  { value: 'dairy', label: 'Dairy (milk)' },
+  { value: 'egg', label: 'Egg' },
+  { value: 'peanut', label: 'Peanut' },
+  { value: 'tree_nut', label: 'Tree nuts' },
+  { value: 'gluten', label: 'Wheat / Gluten' },
+  { value: 'soy', label: 'Soy' },
+  { value: 'fish', label: 'Fish' },
+  { value: 'shellfish', label: 'Shellfish' },
+  { value: 'sesame', label: 'Sesame' },
+];
+
+const DISLIKE_OPTIONS: { value: string; label: string }[] = [
+  { value: 'cilantro', label: 'Cilantro' },
+  { value: 'olives', label: 'Olives' },
+  { value: 'mushroom', label: 'Mushrooms' },
+  { value: 'anchovy', label: 'Anchovies' },
+  { value: 'beets', label: 'Beets' },
+  { value: 'eggplant', label: 'Eggplant' },
+  { value: 'blue_cheese', label: 'Blue cheese' },
+];
 
 const HEALTHY_SURVEY_KEY = 'mc_healthy_survey_v1';
 const HEALTHY_SURVEY_DONE_KEY = 'mc_healthy_survey_v1_completed';
@@ -43,7 +67,6 @@ export default function PreferencesPage() {
     allergies: [],
     dislikes: [],
     max_prep_minutes: 45,
-    budget_level: 'medium',
     favorite_mode: 'variety',
     healthy_whole_food: false,
     kid_friendly: false,
@@ -90,7 +113,6 @@ export default function PreferencesPage() {
           allergies: data.allergies ?? [],
           dislikes: data.disliked_ingredients ?? [],
           max_prep_minutes: data.max_prep_time ?? 45,
-          budget_level: data.budget_level ?? 'medium',
           favorite_mode: data.favorite_mode === 'favorites' ? 'favorites' : 'variety',
           healthy_whole_food: data.healthy_whole_food ?? false,
           kid_friendly: data.kid_friendly ?? false,
@@ -155,7 +177,6 @@ export default function PreferencesPage() {
       allergies: prefs.allergies,
       disliked_ingredients: prefs.dislikes,
       max_prep_time: prefs.max_prep_minutes,
-      budget_level: prefs.budget_level,
       favorite_mode: prefs.favorite_mode,
       healthy_whole_food: prefs.healthy_whole_food,
       kid_friendly: prefs.kid_friendly,
@@ -197,7 +218,7 @@ export default function PreferencesPage() {
   if (loading) return <p className="max-w-2xl mx-auto">Loading…</p>;
 
   // shared styles (kept consistent with Pantry)
-  const chipBase = 'px-3 py-1.5 rounded-md border text-sm transition';
+  const chipBase = 'px-2.5 py-1 rounded-md border text-sm transition';
   const chipOff =
     'border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-900 text-gray-700 dark:text-gray-300';
   const chipOn =
@@ -207,20 +228,20 @@ export default function PreferencesPage() {
   const selectCls = inputCls + ' pr-8';
 
   return (
-    <div className="max-w-2xl mx-auto">
+    <div className="max-w-3xl mx-auto">
       <h1 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100">
         Preferences
       </h1>
 
       {/* Card (same look & sizing philosophy as Pantry) */}
-      <section className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900 p-4 shadow-sm">
+      <section className="rounded-xl border border-gray-200 dark:border-gray-800 bg-white dark:bg-neutral-900 p-5 shadow-sm">
         {/* Diet */}
-        <div className="mb-5">
+        <div className="mb-4">
           <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
             Diet
           </label>
           <select
-            className={`${selectCls} w-48`}
+            className={`${selectCls} w-56`}
             value={prefs.diet}
             onChange={(e) => setPrefs((p) => ({ ...p, diet: e.target.value }))}
           >
@@ -233,62 +254,58 @@ export default function PreferencesPage() {
         </div>
 
         {/* Allergies */}
-        <div className="mb-5">
+        <div className="mb-4">
           <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
             Allergies (toggle)
           </label>
           <div className="flex flex-wrap gap-2">
-            {['peanut', 'shellfish', 'gluten', 'dairy', 'egg', 'soy', 'sesame'].map(
-              (a) => {
-                const selected = prefs.allergies.includes(a);
-                return (
-                  <button
-                    key={a}
-                    type="button"
-                    onClick={() => editList('allergies', a)}
-                    className={`${chipBase} ${selected ? chipOn : chipOff}`}
-                  >
-                    {a}
-                  </button>
-                );
-              },
-            )}
+            {ALLERGY_OPTIONS.map(({ value, label }) => {
+              const selected = prefs.allergies.includes(value);
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => editList('allergies', value)}
+                  className={`${chipBase} ${selected ? chipOn : chipOff}`}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
         {/* Dislikes */}
-        <div className="mb-6">
+        <div className="mb-5">
           <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
             Dislikes (toggle)
           </label>
           <div className="flex flex-wrap gap-2">
-            {['cilantro', 'mushroom', 'tuna', 'broccoli', 'olives', 'beets'].map(
-              (d) => {
-                const selected = prefs.dislikes.includes(d);
-                return (
-                  <button
-                    key={d}
-                    type="button"
-                    onClick={() => editList('dislikes', d)}
-                    className={`${chipBase} ${selected ? chipOn : chipOff}`}
-                  >
-                    {d}
-                  </button>
-                );
-              },
-            )}
+            {DISLIKE_OPTIONS.map(({ value, label }) => {
+              const selected = prefs.dislikes.includes(value);
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => editList('dislikes', value)}
+                  className={`${chipBase} ${selected ? chipOn : chipOff}`}
+                >
+                  {label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
-        {/* Numbers/select row */}
-        <div className="mb-4 flex flex-wrap gap-6">
+        {/* Planning settings */}
+        <div className="mb-5 flex items-end gap-6 flex-wrap">
           <div>
             <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
               Max prep minutes
             </label>
             <input
               type="number"
-              className={`${inputCls} w-32`}
+              className={`${inputCls} w-20 h-8`}
               value={prefs.max_prep_minutes}
               onChange={(e) =>
                 setPrefs((p) => ({
@@ -298,34 +315,13 @@ export default function PreferencesPage() {
               }
             />
           </div>
-          <div>
-            <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
-              Budget
-            </label>
-            <select
-              className={`${selectCls} w-40`}
-              value={prefs.budget_level}
-              onChange={(e) =>
-                setPrefs((p) => ({ ...p, budget_level: e.target.value }))
-              }
-            >
-              {BUDGET.map((b) => (
-                <option key={b} value={b}>
-                  {b}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
 
-                {/* Planning defaults */}
-        <div className="mb-5 flex flex-wrap gap-6">
           <div>
             <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
               Dinners per week
             </label>
             <select
-              className={`${selectCls} w-32`}
+              className={`${selectCls} w-20 h-8`}
               value={prefs.dinners_per_week}
               onChange={(e) =>
                 setPrefs((p) => ({
@@ -347,7 +343,7 @@ export default function PreferencesPage() {
               People
             </label>
             <select
-              className={`${selectCls} w-32`}
+              className={`${selectCls} w-20 h-8`}
               value={prefs.people_count}
               onChange={(e) =>
                 setPrefs((p) => ({
@@ -366,7 +362,7 @@ export default function PreferencesPage() {
         </div>
 
         {/* Health & family preferences */}
-        <div className="mb-5">
+        <div className="mb-4">
           <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
             Health &amp; family preferences
           </label>
@@ -411,6 +407,7 @@ export default function PreferencesPage() {
               </span>
             </label>
 
+
             {/* Kid-friendly */}
             <label className="inline-flex items-center gap-2">
               <input
@@ -429,7 +426,7 @@ export default function PreferencesPage() {
         </div>
 
         {/* Plan style: variety vs favorites */}
-        <div className="mb-5">
+        <div className="mb-4">
           <label className="block mb-1 font-medium text-gray-900 dark:text-gray-100">
             Plan style
           </label>
@@ -460,16 +457,37 @@ export default function PreferencesPage() {
         </div>
 
         {/* Save */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={save}
-            className="rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg:white dark:text-black"
-          >
-            Save
-          </button>
-          {saved ? (
-            <span className="text-green-600 dark:text-green-400">Saved!</span>
-          ) : null}
+        <div className="mb-6">
+          <div className="flex items-center gap-3">
+            <button
+              onClick={save}
+              className="rounded px-4 py-2 bg-gray-900 text-white hover:bg-gray-800
+                dark:bg-gray-100 dark:text-gray-900 dark:hover:bg-white"
+            >
+              Save
+            </button>
+            {saved ? (
+              <span className="text-green-600 dark:text-green-400">Saved!</span>
+            ) : null}
+          </div>
+        </div>
+
+        {/* Support & Feedback */}
+        <div className="mt-6 pt-5 border-t border-gray-200 dark:border-gray-800">
+          <h2 className="text-base font-medium text-gray-900 dark:text-gray-100">
+            Support &amp; Feedback
+          </h2>
+          <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+            Report a bug or suggest an improvement.
+          </p>
+          <div className="mt-3">
+            <Link
+              href="/support"
+              className="inline-flex rounded px-3.5 py-2 border border-gray-300 dark:border-gray-700 text-sm text-gray-800 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-neutral-800"
+            >
+              Send feedback
+            </Link>
+          </div>
         </div>
       </section>
 

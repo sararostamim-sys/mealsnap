@@ -12,7 +12,6 @@ type PrefsLite = {
   allergies: string[];
   dislikes: string[];
   max_prep_minutes: number;
-  budget_level: string;
   favorite_mode?: 'variety' | 'favorites';
   healthy_whole_food?: boolean;
   kid_friendly?: boolean;
@@ -27,6 +26,8 @@ type RecipeLite = {
   time_min: number;
   diet_tags: string[] | null;
   ingredients: string[];
+  // Optional: passed from client for better planning
+  is_favorite?: boolean;
 };
 
 type LlmPlanRequest = {
@@ -108,6 +109,7 @@ function stableKeyFromRequest(body: LlmPlanRequest): string {
         .map((x) => x.toLowerCase().trim())
         .filter(Boolean)
         .sort(),
+      is_favorite: !!r.is_favorite,
     }))
     .sort((a, b) => a.id.localeCompare(b.id));
 
@@ -120,7 +122,6 @@ function stableKeyFromRequest(body: LlmPlanRequest): string {
     prefs: {
       diet: prefs.diet ?? 'none',
       max_prep_minutes: prefs.max_prep_minutes ?? 45,
-      budget_level: prefs.budget_level ?? 'medium',
       favorite_mode: prefs.favorite_mode ?? null,
       healthy_whole_food: prefs.healthy_whole_food ?? null,
       kid_friendly: prefs.kid_friendly ?? null,
@@ -146,6 +147,166 @@ function getApiKey(): string {
   return key;
 }
 
+function norm(s: string): string {
+  return String(s ?? '').toLowerCase().trim();
+}
+
+function escapeRegex(s: string) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function matchesTerm(ing: string, term: string): boolean {
+  const t = norm(term);
+  if (!t) return false;
+  const i = norm(ing);
+  if (!i) return false;
+
+  // Multi-word terms (e.g., "soy sauce") -> substring match on normalized string
+  if (t.includes(' ')) return i.includes(t);
+
+  // Single token -> word boundary match
+  const rx = new RegExp(`\\b${escapeRegex(t)}s?\\b`, 'i');
+  return rx.test(i);
+}
+
+// Expand common allergy toggles into the ingredient words we actually see.
+function expandAllergyTerms(allergies: string[]): string[] {
+  const base = (allergies ?? []).map(norm).filter(Boolean);
+
+  const MAP: Record<string, string[]> = {
+    dairy: [
+      'milk',
+      'cheese',
+      'butter',
+      'yogurt',
+      'cream',
+      'sour cream',
+      'whey',
+      'casein',
+      'ghee',
+      'mozzarella',
+      'cheddar',
+      'parmesan',
+      'feta',
+    ],
+    gluten: [
+      'wheat',
+      'flour',
+      'bread',
+      'pasta',
+      'noodle',
+      'tortilla',
+      'cracker',
+      'breadcrumb',
+      'breadcrumbs',
+      'soy sauce',
+    ],
+    egg: ['egg', 'eggs', 'mayonnaise', 'mayo'],
+    peanut: ['peanut', 'peanuts'],
+    shellfish: [
+      'shrimp',
+      'prawn',
+      'crab',
+      'lobster',
+      'clam',
+      'mussel',
+      'oyster',
+      'scallop',
+    ],
+    soy: ['soy', 'tofu', 'edamame', 'miso', 'tempeh', 'soy sauce'],
+    sesame: ['sesame', 'tahini'],
+  };
+
+  const out: string[] = [];
+  for (const a of base) {
+    out.push(a);
+    const extras = MAP[a];
+    if (extras?.length) out.push(...extras.map(norm));
+  }
+  return Array.from(new Set(out)).filter(Boolean);
+}
+
+const DIET_FORBIDDEN_ING: Record<string, RegExp[]> = {
+  vegetarian: [
+    /\bchicken\b/i,
+    /\bbeef\b/i,
+    /\bpork\b/i,
+    /\bham\b/i,
+    /\bsausage\b/i,
+    /\bbacon\b/i,
+    /\bturkey\b/i,
+    /\bshrimp\b/i,
+    /\banchovies?\b/i,
+    /\bgelatin\b/i,
+  ],
+  vegan: [
+    /\bchicken\b/i,
+    /\bbeef\b/i,
+    /\bpork\b/i,
+    /\bham\b/i,
+    /\bsausage\b/i,
+    /\bbacon\b/i,
+    /\bturkey\b/i,
+    /\bshrimp\b/i,
+    /\banchovies?\b/i,
+    /\bgelatin\b/i,
+    /\beggs?\b/i,
+    /\bcheese\b/i,
+    /\bmilk\b/i,
+    /\byogurt\b/i,
+    /\bbutter\b/i,
+    /\bcream\b/i,
+    /\bwhey\b/i,
+  ],
+};
+
+function violatesDietLite(recipe: RecipeLite, diet: string): boolean {
+  const d = norm(diet);
+  const rules = DIET_FORBIDDEN_ING[d] || [];
+  if (!rules.length) return false;
+  const ings = recipe.ingredients ?? [];
+  return ings.some((ing) => rules.some((rx) => rx.test(ing)));
+}
+
+function violatesTermsLite(recipe: RecipeLite, terms: string[]): boolean {
+  if (!terms?.length) return false;
+  const ings = recipe.ingredients ?? [];
+  for (const ing of ings) {
+    for (const t of terms) {
+      if (matchesTerm(ing, t)) return true;
+    }
+  }
+  return false;
+}
+
+function scoreFallbackRecipe(
+  recipe: RecipeLite,
+  pantrySet: Set<string>,
+  prefs: PrefsLite,
+): number {
+  const ings = (recipe.ingredients ?? []).map(norm).filter(Boolean);
+  if (!ings.length) return -999;
+
+  let pantryHits = 0;
+  let missing = 0;
+  for (const ing of ings) {
+    if (pantrySet.has(ing)) pantryHits += 1;
+    else missing += 1;
+  }
+
+  const timeOk = recipe.time_min <= (prefs.max_prep_minutes ?? 45);
+  const timeScore = timeOk ? 1.5 : -2;
+
+  const favBoost = recipe.is_favorite && prefs.favorite_mode === 'favorites' ? 3 : 0;
+
+  // Prefer high pantry overlap, fewer missing items
+  return pantryHits * 2 - missing * 0.75 + timeScore + favBoost;
+}
+
+function uniq<T>(arr: T[]): T[] {
+  return Array.from(new Set(arr));
+}
+
 export async function POST(req: NextRequest) {
   if (process.env.USE_LLM_PLAN === 'false') {
     return NextResponse.json(
@@ -160,6 +321,13 @@ export async function POST(req: NextRequest) {
   try {
     const body = (await req.json()) as LlmPlanRequest;
     const { pantryNames, prefs, recipes, days = 7, healthyProfile } = body;
+
+    // Enforce non-veg/veg balance for all diets EXCEPT vegetarian/vegan.
+    // Applies to: "none", "gluten_free", "halal", "kosher", etc.
+    const dietNorm = norm(prefs?.diet ?? 'none');
+    const enforceNonVegBalance = dietNorm !== 'vegetarian' && dietNorm !== 'vegan';
+    // Soft cap used in prompt only (hard enforcement can be done client-side if desired)
+    const maxVegMeals = Math.max(1, Math.ceil(days * 0.4));
 
     const now = Date.now();
     pruneCache(now);
@@ -288,7 +456,6 @@ User preferences:
 - allergies: prefs.allergies (MUST be strictly avoided)
 - dislikes: prefs.dislikes (avoid when possible)
 - max_prep_minutes: prefer recipes under this time
-- budget_level: "low" | "medium" | "high" (use cheaper-looking ingredients for "low" when possible)
 - favorite_mode: prefs.favorite_mode (if "favorites", it's okay to repeat favorite-type recipes a bit more often)
 - healthy_whole_food: prefs.healthy_whole_food (if true, prefer more whole, minimally processed options)
 - kid_friendly: prefs.kid_friendly (if true, avoid very spicy or very complex flavors)
@@ -300,9 +467,18 @@ Pantry:
 - Prefer recipes whose ingredients appear in pantryNames, but some extra shopping is OK.
 
 Other rules:
+- Pantry-first: prefer recipes that use more pantry ingredients.
+- Minimize shopping friction: prefer plans that reuse the same missing ingredients across multiple meals (consolidate the list).
+- Waste reduction: if possible, use perishable-looking pantry items earlier in the week.
 - Aim for variety across the week (avoid repeating the same recipe if possible).
+${enforceNonVegBalance ? `
+Protein mix rule (diet is not vegetarian/vegan):
+- Do NOT return a plan where vegetarian/vegan meals are the majority.
+- Cap vegetarian/vegan meals to ${maxVegMeals} or fewer across the ${days} dinners when possible.
+- Prefer a balanced mix of proteins across the week (e.g., chicken/fish/eggs/beans/tofu), unless user preferences force otherwise.
+` : ''}
 - If diet !== "none", prefer recipes whose diet_tags contain that diet, or are clearly compatible.
-- If you cannot find enough fully compliant recipes, choose the best approximate matches, but NEVER include allergens.
+- If you cannot find enough fully compliant recipes, return as many as you can, but NEVER include allergens.
 ${healthSection ? `
 
 ${healthSection}` : ''}${kidSection ? `
@@ -378,12 +554,70 @@ Return ONLY valid JSON in this exact shape and nothing else:
         return { ok: false, error: 'Missing recipeIds in LLM response' };
       }
 
-      return { ok: true, recipeIds: parsed.recipeIds };
+      // --- Server-side guardrails: NEVER return allergens/dislikes/diet-violating recipes ---
+      const pantrySet = new Set((pantryNames ?? []).map(norm).filter(Boolean));
+
+      const allergyTerms = expandAllergyTerms(prefs?.allergies ?? []);
+      const dislikeTerms = (prefs?.dislikes ?? []).map(norm).filter(Boolean);
+
+      // Build a safe candidate list from provided recipes
+      const recipeById = new Map<string, RecipeLite>();
+      for (const r of recipes ?? []) recipeById.set(r.id, r);
+
+      const safeRecipes: RecipeLite[] = (recipes ?? []).filter((r) => {
+        if (!r?.id) return false;
+        if (violatesDietLite(r, prefs?.diet ?? 'none')) return false;
+        if (violatesTermsLite(r, allergyTerms)) return false; // HARD
+        // dislikes are treated as hard here to bullet-proof; client can relax separately if desired
+        if (violatesTermsLite(r, dislikeTerms)) return false;
+        return true;
+      });
+
+      // Sanitize the model output
+      const rawIds = parsed.recipeIds.map((x) => String(x)).filter(Boolean);
+      const uniqueIds = uniq(rawIds);
+
+      const pickedSafe: string[] = [];
+      for (const id of uniqueIds) {
+        const r = recipeById.get(id);
+        if (!r) continue;
+        if (violatesDietLite(r, prefs?.diet ?? 'none')) continue;
+        if (violatesTermsLite(r, allergyTerms)) continue;
+        if (violatesTermsLite(r, dislikeTerms)) continue;
+        pickedSafe.push(id);
+        if (pickedSafe.length >= days) break;
+      }
+
+      // Fill remainder deterministically from safe pool
+      if (pickedSafe.length < days && safeRecipes.length) {
+        const already = new Set(pickedSafe);
+        const ranked = safeRecipes
+          .filter((r) => !already.has(r.id))
+          .slice()
+          .sort((a, b) => {
+            const sa = scoreFallbackRecipe(a, pantrySet, prefs);
+            const sb = scoreFallbackRecipe(b, pantrySet, prefs);
+            if (sb !== sa) return sb - sa;
+            return a.id.localeCompare(b.id);
+          });
+
+        for (const r of ranked) {
+          pickedSafe.push(r.id);
+          if (pickedSafe.length >= days) break;
+        }
+      }
+
+      // As an absolute last resort, return whatever safe IDs we could find (may be < days)
+      return { ok: true, recipeIds: pickedSafe };
     })();
 
     inFlight.set(cacheKey, p);
-    const value = await p;
-    inFlight.delete(cacheKey);
+    let value: LlmPlanResponse;
+    try {
+      value = await p;
+    } finally {
+      inFlight.delete(cacheKey);
+    }
 
     // Cache only successful plans with recipeIds
     if (value.ok && Array.isArray(value.recipeIds) && value.recipeIds.length) {

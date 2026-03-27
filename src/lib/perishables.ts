@@ -15,7 +15,7 @@ export type PerishabilityScore = 1 | 2 | 3 | 4;
  * push them early in the week.
  */
 export function getPerishabilityScore(ingredientName: string): PerishabilityScore {
-  const n = ingredientName.toLowerCase().trim();
+  const n = ingredientName.toLowerCase().replace(/\s+/g, ' ').trim();
 
   if (!n) return 1;
 
@@ -24,39 +24,51 @@ export function getPerishabilityScore(ingredientName: string): PerishabilityScor
     return 1;
   }
 
-    // Very perishable: salad greens, berries, herbs, soft fruit, FRESH FISH/SEAFOOD
+  // Heuristics to avoid over-prioritizing shelf-stable versions
+  const looksCannedOrShelfStable = /(canned|tin|tinned|pouch|shelf\s*stable|jarred|in\s+water|in\s+oil)/.test(n);
+  const looksFresh = /(fresh|raw)/.test(n);
+
+  // Very perishable: salad greens, berries, herbs, soft fruit, FRESH fish/seafood
   if (
-    /(arugula|spring mix|mixed greens|spinach|lettuce|romaine|kale|chard)/.test(n) ||
-    /(strawberry|blueberry|raspberry|blackberry|berry)/.test(n) ||
-    /(cilantro|parsley|basil|mint|dill|chives)/.test(n) ||
-    /(avocado|peach|plum|nectarine)/.test(n) ||
+    /\b(arugula|spring mix|mixed greens|spinach|lettuce|romaine|kale|chard)\b/.test(n) ||
+    /\b(strawberry|blueberry|raspberry|blackberry|berries?)\b/.test(n) ||
+    /\b(cilantro|parsley|basil|mint|dill|chives)\b/.test(n) ||
+    /\b(avocado|peach|plum|nectarine)\b/.test(n) ||
     // fish/seafood → treat as most perishable so it’s used early in the week
-    /(salmon|cod|tilapia|trout|halibut|sea ?bass|white fish|fish fillet|shrimp|prawn|scallops?)/.test(n)
+    // but avoid canned/pouched fish unless explicitly marked fresh.
+    ((/\b(salmon|cod|tilapia|trout|halibut|sea ?bass|white fish|fish fillet|shrimp|prawn|scallops?)\b/.test(n)) &&
+      (!looksCannedOrShelfStable || looksFresh))
   ) {
     return 4;
   }
 
   // Perishable: most fresh veg, fresh meat, some dairy
   if (
-    /(tomato|cucumber|zucchini|squash|mushroom|broccoli|cauliflower|pepper|bell pepper|green bean|asparagus|cabbage)/.test(
+    /\b(tomato|cucumber|zucchini|squash|mushroom|broccoli|cauliflower|pepper|bell pepper|green beans?|asparagus|cabbage)\b/.test(
       n,
     ) ||
-    /(chicken breast|chicken thighs?|ground chicken|ground beef|ground turkey|pork chop|steak|pork loin)/.test(
+    /\b(chicken breast|chicken thighs?|ground chicken|ground beef|ground turkey|pork chop|steak|pork loin)\b/.test(
       n,
     ) ||
-    /(fresh mozzarella|ricotta|cream cheese|sour cream)/.test(n) ||
-    /(strawberries|berries)/.test(n)
+    /\b(fresh mozzarella|ricotta|cream cheese|sour cream|cottage cheese)\b/.test(n) ||
+    // tofu/tempeh are refrigerated and typically used within a week
+    /\b(tofu|tempeh)\b/.test(n)
   ) {
     return 3;
   }
 
-  // Somewhat perishable: milk/yogurt, bread, tortillas, some cheeses
+  // Somewhat perishable: milk/yogurt, bread, tortillas, some cheeses, eggs, hummus
   if (
-    /(milk|yogurt|yoghurt|cheddar|jack cheese|shredded cheese|feta|parmesan|parmigiano)/.test(n) ||
-    /(bread|buns|tortilla|pita|naan)/.test(n) ||
-    /(hummus)/.test(n)
+    /\b(milk|yogurt|yoghurt|cheddar|jack cheese|shredded cheese|feta|parmesan|parmigiano)\b/.test(n) ||
+    /\b(bread|buns|tortilla|pita|naan)\b/.test(n) ||
+    /\b(hummus|eggs?)\b/.test(n)
   ) {
     return 2;
+  }
+
+  // Shelf-stable canned/pouched fish should not be prioritized early
+  if (looksCannedOrShelfStable && /\b(tuna|salmon|sardines?|anchov(?:y|ies)|mackerel)\b/.test(n)) {
+    return 1;
   }
 
   // Default: stable pantry (rice, pasta, canned goods, oils, spices, etc.)
@@ -102,10 +114,33 @@ export function scoreFromPerishDate(
   if (Number.isNaN(time)) return 1;
 
   const now = Date.now();
-  const diffDays = Math.floor((time - now) / (1000 * 60 * 60 * 24));
+  const MS_PER_DAY = 1000 * 60 * 60 * 24;
+  const diffMs = time - now;
+  const diffDays = Math.ceil(diffMs / MS_PER_DAY);
 
   if (diffDays <= 1) return 4; // today / tomorrow / overdue → very urgent
   if (diffDays <= 3) return 3;
   if (diffDays <= 7) return 2;
   return 1;
+}
+
+/**
+ * Pantry-aware perishability score.
+ *
+ * Priority order:
+ * 1) If user explicitly marked the item as `use_soon`, treat as very urgent.
+ * 2) If a perish-by date exists, use it.
+ * 3) Otherwise fall back to name heuristics.
+ */
+export function scoreForPantryItem(input: {
+  name: string;
+  use_soon?: boolean | null;
+  perish_by?: Date | string | null | undefined;
+}): PerishabilityScore {
+  if (input.use_soon) return 4;
+
+  const byDate = scoreFromPerishDate(input.perish_by);
+  if (byDate !== 1) return byDate;
+
+  return getPerishabilityScore(input.name);
 }

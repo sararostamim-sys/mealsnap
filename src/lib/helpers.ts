@@ -95,16 +95,18 @@ function brandlessName(input: string): string {
   // 2) “Brand, Organic Beans” → “Organic Beans”
   s = s.replace(/^[^,]+,\s*(.+)$/i, '$1').trim();
 
-  // 3) Drop leading marketing adjectives we don’t model separately
-  //    (organic, gluten-free, low sodium, etc.)
+  // 3) Drop leading marketing adjectives / qualifiers we don’t want as pantry item names.
+  //    Keep this focused on modifiers rather than ingredient nouns.
   s = s.replace(
-    /^(?:\b(organic|gluten[-\s]*free|low\s+sodium|reduced\s+sodium|no\s+salt\s+added)\b[\s,:-]*)+/gi,
+    /^(?:\b(organic|gluten[-\s]*free|low\s+sodium|reduced\s+sodium|no\s+salt\s+added|unsalted|salted|natural|all\s+natural|non[-\s]*gmo|plant\s+based|plain)\b[\s,:-]*)+/gi,
     ''
   ).trim();
 
   // 4) Strip “made with …”, “with sea salt”, etc. at the end
   s = s.replace(/\bmade\s+with\b.*$/i, '').trim();
   s = s.replace(/\bwith\s+sea\s+salt\b.*$/i, '').trim();
+    // 4b) Remove trailing qualifiers that are useful on packaging but noisy in pantry names.
+  s = s.replace(/\b(organic|gluten[-\s]*free|low\s+sodium|reduced\s+sodium|no\s+salt\s+added|unsalted|salted|plain)\b$/gi, '').trim();
 
   // 5) General cleanup of spacing / punctuation
   s = s
@@ -218,24 +220,98 @@ function toPantryRow(
   category?: string | null
 ): { name: string; qty: number; unit: string } {
   const base = brandlessName(rawName || '');
-  const clean = tidyCase(base);
-  const { qty, unit } = inferQtyUnit(clean, size ?? undefined, category ?? undefined);
-  return { name: clean, qty, unit };
+  const normalizedBase = brandlessName(base);
+  const clean = tidyCase(normalizedBase);
+  const finalName = clean || tidyCase(rawName || '') || 'Item';
+  const { qty, unit } = inferQtyUnit(finalName, size ?? undefined, category ?? undefined);
+  return { name: finalName, qty, unit };
 }
 
 // ---- OCR label picker (Vision + Tesseract friendly) ----
 
 // Words that tell us "this is actual food"
 const FOOD_WORD_RE =
-  /\b(beans?|kidney|black|pinto|chickpeas?|garbanzo|lentils?|pasta|fusilli|penne|rigatoni|spaghetti|noodles?|macaroni|rice|quinoa|oats?|cereal|tomato(es)?|sauce|soup|broth|corn|peas|tuna|salmon|chicken)\b/i;
+  /\b(beans?|kidney|black|pinto|chickpeas?|garbanzo|lentils?|pasta|farfalline|farfalle|fusilli|penne|rigatoni|spaghetti|linguine|fettuccine|orecchiette|radiatori|rotini|noodles?|macaroni|rice|quinoa|oats?|cereal|tomato(es)?|sauce|soup|broth|corn|peas|tuna|salmon|chicken)\b/i;
 
 // Stuff we *don't* want to drive the name
 const JUNK_RE =
-  /\b(gluten\s*free|sodium\s*free|usda|net\s*wt|non[-\s]?gmo|made\s+with|sea\s*salt|organic)\b/i;
+  /\b(gluten\s*free|sodium\s*free|low\s+sodium|reduced\s+sodium|no\s+salt\s+added|usda|net\s*wt|non[-\s]?gmo|made\s+with|sea\s*salt|ingredients?|nutrition\s+facts|serving\s+size|per\s+container|keep\s+refrigerated|perishable|microwave|stovetop|warning|distributed\s+by|best\s+before|best\s+by|use\s+by|sell\s+by|organic)\b/i;
 
 // Common brand-ish words
 const BRAND_RE_LINE =
   /\b(trader\s+joe'?s?|kirkland|costco|barilla|rummo|goya|campbell'?s|heinz)\b/i;
+
+const FOOD_HEAD_RE =
+  /\b(kidney\s+beans?|black\s+beans?|pinto\s+beans?|cannellini\s+beans?|garbanzo\s+beans?|chickpeas?|lentils?|pasta|spaghetti|penne|rigatoni|fusilli|farfalle|rice|quinoa|oats?|tomato\s+sauce|tomato\s+soup|broth|stock|corn|peas|tuna|salmon|chicken)\b/i;
+
+const SPECIFIC_PRODUCT_RE =
+  /\b(farfalline|farfalle|fusilli|rigatoni|penne|spaghetti|linguine|fettuccine|orecchiette|radiatori|rotini|macaroni|basmati|jasmine|arborio|kidney\s+beans?|black\s+beans?|pinto\s+beans?|cannellini\s+beans?|garbanzo\s+beans?|chickpeas?|lentils?|quinoa|broth|stock|tuna|salmon)\b/i;
+
+const HERITAGE_OR_DESCRIPTOR_RE =
+  /\b(product\s+of\s+italy|macaroni\s+product|la\s+pasta\s+di\s+gragnano|dal\s+1789|since\s+\d{4}|est\.?\s*\d{4})\b/i;
+
+const GENERIC_PRODUCT_RE =
+  /\b(product|food\s+product|macaroni\s+product)\b/i;
+
+const PACKAGE_NOISE_RE =
+  /\b(oz|g|lb|ml|fl\s*oz|net\s*wt|serving|nutrition|ingredients?|distributed|keep|refrigerated|microwave|stovetop|warning|best|sell|use)\b/i;
+
+function countWords(text: string): number {
+  return (text.match(/[a-zA-Z]+(?:'[a-zA-Z]+)?/g) || []).length;
+}
+
+function scoreOcrCandidate(text: string, foodCount: number, junkCount: number, brandCount: number): number {
+  const normalized = text.toLowerCase().trim();
+  const wordCount = countWords(normalized);
+
+  let score = 0;
+
+  // Core signal: food words matter most.
+  score += foodCount * 8;
+
+  // Prefer concise product-name-like phrases.
+  if (wordCount >= 1 && wordCount <= 6) score += 6;
+  else if (wordCount <= 9) score += 2;
+  else score -= 4;
+
+  // Prefer labels that start or strongly center on the ingredient itself.
+  if (FOOD_HEAD_RE.test(normalized)) score += 6;
+
+  // Strongly prefer specific product nouns / pantry names (for example pasta shapes).
+  const hasSpecificProduct = SPECIFIC_PRODUCT_RE.test(normalized);
+  if (hasSpecificProduct) score += 8;
+
+  // If the candidate is basically just the product name, reward it heavily.
+  // This helps single-line names like "FARFALLINE" beat descriptor phrases.
+  if (hasSpecificProduct && wordCount <= 2) score += 8;
+  else if (hasSpecificProduct && wordCount <= 4) score += 4;
+
+  // Short clean names like “kidney beans” or “organic kidney beans” should win.
+  if (/^[a-z0-9' -]{4,60}$/i.test(text)) score += 2;
+
+  // Penalize packaging / nutrition / instruction noise.
+  score -= junkCount * 3;
+  if (PACKAGE_NOISE_RE.test(normalized)) score -= 3;
+
+  // Penalize heritage / descriptor phrases that are not usually the pantry item name.
+  if (HERITAGE_OR_DESCRIPTOR_RE.test(normalized)) score -= 6;
+
+  // Penalize generic "product" wording. This is almost never the best pantry label.
+  if (GENERIC_PRODUCT_RE.test(normalized)) score -= 6;
+
+  // Penalize brand-heavy phrases a bit, but not too much.
+  score -= brandCount * 2;
+
+  // Penalize very long character strings that are unlikely to be the item name.
+  const lenChars = text.length;
+  if (lenChars >= 8 && lenChars <= 48) score += 4;
+  else if (lenChars > 72) score -= 4;
+
+  // Reward exact/simple ingredient-style names.
+  if (/^[a-z]+(?:\s+[a-z]+){0,3}$/i.test(text)) score += 3;
+
+  return score;
+}
 
 function countMatches(text: string, re: RegExp): number {
   const m = text.match(new RegExp(re.source, re.flags + 'g')) || [];
@@ -279,30 +355,16 @@ function pickBestOcrLabel(rawText: string, _lines?: string[]): string {
       const text = slice.join(' ').replace(/\s{2,}/g, ' ').trim();
       if (!text) continue;
 
-      // Compute features
       const foodCount = countMatches(text, FOOD_WORD_RE);
       const junkCount = countMatches(text, JUNK_RE);
       const brandCount = countMatches(text, BRAND_RE_LINE);
+      const hasSpecificProduct = SPECIFIC_PRODUCT_RE.test(text);
 
-      // We need at least *one* food word, otherwise skip
-      if (foodCount === 0) continue;
+      // Keep candidates that either contain general food words
+      // or match a specific pantry product name like a pasta shape.
+      if (foodCount === 0 && !hasSpecificProduct) continue;
 
-      const lenChars = text.length;
-
-      // Scoring heuristic:
-      //  - big bonus for more food words
-      //  - small bonus for reasonable length (not too tiny, not gigantic)
-      //  - penalty for junk & brand noise
-      let score = 0;
-
-      score += foodCount * 8;
-      if (lenChars >= 8 && lenChars <= 80) {
-        score += 4;
-        if (lenChars >= 14 && lenChars <= 55) score += 4; // "Goldilocks" range
-      }
-
-      score -= junkCount * 2;
-      score -= brandCount * 2;
+      const score = scoreOcrCandidate(text, foodCount, junkCount, brandCount);
 
       cands.push({ text, score });
     }
@@ -325,17 +387,11 @@ function pickBestOcrLabel(rawText: string, _lines?: string[]): string {
   }
   const dedup = Array.from(dedupMap.values());
 
-  // Sort best-first
-  dedup.sort((a, b) => b.score - a.score || b.text.length - a.text.length);
+  // Sort best-first. On ties, prefer shorter cleaner names.
+  dedup.sort((a, b) => b.score - a.score || a.text.length - b.text.length);
 
   const best = dedup[0];
 
-  if (typeof window !== 'undefined') {
-    // Debug on the client only
-    console.log('[pickBestOcrLabel] lines:', cleanLines);
-    console.log('[pickBestOcrLabel] candidates:', dedup);
-    console.log('[pickBestOcrLabel] chosen:', best);
-  }
 
   return best?.text || raw;
 }
@@ -377,19 +433,13 @@ export async function ocrDetectSingle(file: File): Promise<DetectedItem[]> {
 
   const label = pickBestOcrLabel(rawText, lines);
 
-  // Debug: see what we’re feeding into the label picker and what comes out
-  if (typeof window !== 'undefined') {
-    console.log('[ocrDetectSingle] rawText:', rawText);
-    console.log('[ocrDetectSingle] linesFromRaw:', linesFromRaw);
-    console.log('[ocrDetectSingle] linesArg:', lines);
-    console.log('[ocrDetectSingle] picked label:', label);
-  }
 
   if (!label) {
     return [];
   }
 
   const row = toPantryRow(label);
+
 
   return [
     {
@@ -401,6 +451,7 @@ export async function ocrDetectSingle(file: File): Promise<DetectedItem[]> {
         source: 'ocr',
         rawText,
         label,
+        normalizedName: row.name,
       },
     },
   ];

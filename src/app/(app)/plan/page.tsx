@@ -8,7 +8,13 @@ import type { HealthyProfile } from '@/lib/healthyProfile';
 import { useRequireAuth } from '@/hooks/useRequireAuth';
 import FavoriteButton from '@/components/FavoriteButton';
 import { getDevUserId } from '@/lib/user';
-import { smartMergeNeeds, ShoppingItem, RawNeed, normalizeIngredientName } from '@/lib/shopping';
+import {
+  smartMergeNeedsWithSubstitutions,
+  subtractPantryFromNeeds,
+  ShoppingItem,
+  RawNeed,
+  normalizeIngredientName,
+} from '@/lib/shopping';
 import { STORES, getPriceEstimate, StoreId } from '@/lib/pricing';
 import {
   buildInstacartUrl,
@@ -18,7 +24,7 @@ import {
 import { computeRecipePerishability, scoreFromPerishDate } from '@/lib/perishables';
 import type { PantryCategory } from '@/lib/pantryCategorizer';
 import { prettyCategoryLabel } from '@/lib/pantryCategorizer';
-import React, { Fragment, Suspense } from 'react';
+import { Fragment, Suspense } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { trackEvent } from '@/lib/analytics';
 import Modal from '@/components/Modal';
@@ -48,7 +54,6 @@ type Prefs = {
   allergies: string[];
   dislikes: string[];
   max_prep_minutes: number;
-  budget_level: string;
   favorite_mode: 'variety' | 'favorites';
   healthy_whole_food: boolean;
   kid_friendly: boolean;
@@ -68,6 +73,8 @@ type HealthySurvey = {
 };
 
 const HEALTHY_SURVEY_KEY = 'mc_healthy_survey_v1';
+// Debug toggle (set NEXT_PUBLIC_DEBUG_PLAN=1 to enable verbose plan logs)
+const DEBUG_PLAN = process.env.NEXT_PUBLIC_DEBUG_PLAN === '1';
 
   // Pantry staples we don’t want to show in the shopping list
 const STAPLE_SKIP = new Set([
@@ -93,7 +100,14 @@ const STAPLE_SKIP = new Set([
   'red pepper flake',
 ]);
 
-type PantryRow = { name: string; updated_at: string; perish_by: string | null };
+type PantryRow = {
+  name: string;
+  qty: number;
+  unit: string;
+  updated_at: string;
+  perish_by: string | null;
+  use_soon: boolean;
+};
 
 type PlanItem = { recipe_id: string; position: number };
 
@@ -111,7 +125,6 @@ type PrefsRow = Partial<{
   allergies: string[];
   disliked_ingredients: string[];
   max_prep_time: number;
-  budget_level: string;
   favorite_mode: string;
   healthy_whole_food: boolean;
   kid_friendly: boolean;
@@ -134,69 +147,35 @@ type FavoriteRow = {
   recipe_id: string;
 };
 
-function formatApproxVolume(qty: number, unit: string): string {
-  const u = unit.toLowerCase();
-
-  // Normalize tbsp/tsp into cups for display
-  if (u === 'tbsp') {
-    const cups = qty / 16; // 16 tbsp = 1 cup
-    if (cups >= 0.25) return `${Math.round(cups * 10) / 10} cup`;
-    return `${qty} tbsp`;
-  }
-
-  if (u === 'tsp') {
-    const cups = qty / 48; // 48 tsp = 1 cup
-    if (cups >= 0.25) return `${Math.round(cups * 10) / 10} cup`;
-    return `${qty} tsp`;
-  }
-
-  if (u === 'cup' || u === 'cups') {
-    return `${qty} cup`;
-  }
-
-  // If it's already g/ml/etc, just use that
-  return unit ? `${qty} ${unit}` : `${qty}`;
-}
 
 function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
   const name = item.name;
   const qty = item.qty;
   const unit = item.unit;
 
-  // Items that are usually bought as containers, not tablespoons/cups
-  const PACKAGEY = /(milk|yogurt|cheese|feta|mozzarella|tomato sauce|sauce|broth|stock|cream)/i;
   const HERB_BUNCH = /(basil|dill)/i;
   const LEAFY_BAG = /spinach/i;
 
   const isCountUnit = unit === 'unit';
 
-  // Liquids / dairy / cheese / sauce: show 1 container + amount in cups/units
-  if (PACKAGEY.test(name)) {
-    const approxAmount =
-      unit && unit !== 'unit'
-        ? formatApproxVolume(qty, unit)
-        : `${qty}`;
+  // If shopping.ts already decided it's a container, show it as such.
+  // (carton/bottle/can/block/bunch/etc should appear in the unit column.)
+  const isContainerUnit = ['can', 'bottle', 'carton', 'block', 'bunch', 'clove'].includes(unit);
 
-    return {
-      qtyLabel: '1',
-      unitLabel: '',
-      nameLabel: `${name} (about ${approxAmount})`,
-    };
-  }
-
-  // Leafy greens like spinach → 1 bag once amount is large
+  // Leafy greens like spinach → keep bag behavior (but do NOT add "(about ...)" into name)
   if (LEAFY_BAG.test(name)) {
+    // If we’re still in cups and it’s large, allow "bag" as a convenience unit
     if (unit === 'cup' && qty >= 2) {
-      const approx = `${qty} cup`;
       return {
         qtyLabel: '1',
         unitLabel: 'bag',
-        nameLabel: `${name} (about ${approx})`,
+        nameLabel: name,
       };
     }
   }
 
   // Herbs like basil / dill → 1 bunch once amount is large
+  // (This is purely display convenience. No "(about ...)" in name.)
   if (HERB_BUNCH.test(name)) {
     const bigEnough =
       (unit === 'unit' && qty >= 5) ||
@@ -211,7 +190,16 @@ function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
     }
   }
 
-  // For normal count items (onion, lemon, garlic, tortillas)
+  // If we have a container unit, show it in the unit column.
+  if (isContainerUnit) {
+    return {
+      qtyLabel: String(qty),
+      unitLabel: unit,
+      nameLabel: name,
+    };
+  }
+
+  // For normal count items (onion, lemon, etc.)
   if (isCountUnit) {
     return {
       qtyLabel: String(qty),
@@ -220,12 +208,10 @@ function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
     };
   }
 
-  // Default
-  const unitLabel = unit === 'unit' ? '' : unit;
-
+  // Default: show qty + unit (no "(about ...)" injected into name)
   return {
     qtyLabel: String(qty),
-    unitLabel,
+    unitLabel: unit === 'unit' ? '' : unit,
     nameLabel: name,
   };
 }
@@ -234,15 +220,107 @@ function escapeRegex(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function hasAnyTerm(name: string, terms: Set<string>): boolean {
-  const lower = name.toLowerCase();
+
+function normalizeTermSet(terms: Iterable<string>): Set<string> {
+  const out = new Set<string>();
   for (const t of terms) {
-    const term = t.toLowerCase().trim();
-    if (!term) continue;
-    const rx = new RegExp(`\\b${escapeRegex(term)}s?\\b`, 'i');
-    if (rx.test(lower)) return true;
+    const n = normalizeIngredientName(String(t));
+    if (n) out.add(n);
   }
+  return out;
+}
+
+function matchesAnyNormalizedTerm(ingredientName: string, termsNorm: Set<string>): boolean {
+  if (!termsNorm.size) return false;
+
+  const ingNorm = normalizeIngredientName(ingredientName);
+  if (!ingNorm) return false;
+
+  // Exact match
+  if (termsNorm.has(ingNorm)) return true;
+
+  // Token / phrase containment (handles multi-word terms like "soy sauce")
+  for (const t of termsNorm) {
+    if (!t) continue;
+
+    // If the term is multi-word, substring match is usually what we want
+    if (t.includes(' ')) {
+      if (ingNorm.includes(t)) return true;
+      continue;
+    }
+
+    // For single tokens, do word-boundary matching on normalized strings
+    const rx = new RegExp(`\\b${escapeRegex(t)}s?\\b`, 'i');
+    if (rx.test(ingNorm)) return true;
+  }
+
   return false;
+}
+
+function recipeMatchesAnyRegex(
+  recipe: Pick<Recipe, 'title' | 'diet_tags'>,
+  ri: Ing[],
+  rules: RegExp[],
+): boolean {
+  if (!rules.length) return false;
+
+  const haystacks = [
+    recipe.title || '',
+    ...(recipe.diet_tags ?? []).map((t) => String(t)),
+    ...ri.map((it) => String(it.name || '')),
+  ];
+
+  return haystacks.some((text) => rules.some((rx) => rx.test(text)));
+}
+
+type IngredientWeightBand = 'major' | 'medium' | 'minor';
+
+function ingredientWeightBand(nameNorm: string): IngredientWeightBand {
+  // Heuristic: treat proteins/primary carbs/primary produce as "major".
+  // Everything else defaults to medium/minor.
+  const n = nameNorm;
+
+  // Major proteins
+  if (
+    /(\bchicken\b|\bbeef\b|\bpork\b|\bturkey\b|\bshrimp\b|\bsalmon\b|\btuna\b|\begg\b|\beggs\b|\btofu\b|\btempeh\b|\blentil\b|\blentils\b|\bbeans\b|\bchickpea\b|\bchickpeas\b)/.test(n)
+  ) {
+    return 'major';
+  }
+
+  // Major starches / grains
+  if (
+    /(\brice\b|\bquinoa\b|\bpasta\b|\bnoodle\b|\btortilla\b|\bbread\b|\bpotato\b|\bpotatoes\b|\boats\b)/.test(n)
+  ) {
+    return 'major';
+  }
+
+  // Primary produce
+  if (
+    /(\bonion\b|\bgarlic\b|\btomato\b|\bspinach\b|\bbroccoli\b|\bpepper\b|\bbell pepper\b|\bzucchini\b|\bcarrot\b|\bcauliflower\b|\bmushroom\b|\bcilantro\b|\bdill\b|\bbasil\b)/.test(n)
+  ) {
+    return 'major';
+  }
+
+  // Minor: oils/spices/condiments/acid
+  if (
+    /(\boil\b|\bsalt\b|\bpepper\b|\bcumin\b|\bpurchase\b|\bpaprika\b|\bchili\b|\bflake\b|\bvinegar\b|\blemon\b|\blime\b|\bsoy sauce\b|\bhot sauce\b|\bsauce\b|\bmustard\b|\bketchup\b)/.test(n)
+  ) {
+    return 'minor';
+  }
+
+  return 'medium';
+}
+
+function ingredientWeight(nameNorm: string): number {
+  const band = ingredientWeightBand(nameNorm);
+  if (band === 'major') return 3;
+  if (band === 'medium') return 2;
+  return 0.5;
+}
+
+function daysUntil(date: Date): number {
+  const ms = date.getTime() - Date.now();
+  return Math.floor(ms / (1000 * 60 * 60 * 24));
 }
 
 function expandAllergyTerms(allergies: string[]): Set<string> {
@@ -276,6 +354,40 @@ function expandAllergyTerms(allergies: string[]): Set<string> {
       'breadcrumb',
       'breadcrumbs',
       'soy sauce', // often contains wheat unless tamari
+    ],
+        fish: [
+      'fish',
+      'salmon',
+      'tuna',
+      'cod',
+      'tilapia',
+      'trout',
+      'halibut',
+      'anchovy',
+      'anchovies',
+      'sardine',
+      'sardines',
+    ],
+    tree_nut: [
+      'tree nut',
+      'tree nuts',
+      'almond',
+      'almonds',
+      'walnut',
+      'walnuts',
+      'pecan',
+      'pecans',
+      'cashew',
+      'cashews',
+      'pistachio',
+      'pistachios',
+      'hazelnut',
+      'hazelnuts',
+      'macadamia',
+      'brazil nut',
+      'brazil nuts',
+      'pine nut',
+      'pine nuts',
     ],
     egg: ['egg', 'eggs', 'mayonnaise', 'mayo'],
     peanut: ['peanut', 'peanuts'],
@@ -424,7 +536,6 @@ function recipePrefsSignature(p: Prefs) {
     allergies: stableSorted(p.allergies),
     dislikes: stableSorted(p.dislikes),
     max_prep_minutes: p.max_prep_minutes ?? 45,
-    budget_level: p.budget_level ?? 'medium',
     favorite_mode: p.favorite_mode ?? 'variety',
     healthy_whole_food: !!p.healthy_whole_food,
     kid_friendly: !!p.kid_friendly,
@@ -612,17 +723,20 @@ const refreshPantryAndPrefs = useCallback(async () => {
 
   const [pItems, pRes] = await Promise.all([
     supabase
-      .from('pantry_items')
-      .select('name,updated_at,perish_by')
-      .eq('user_id', uid),
+  .from('pantry_items')
+  .select('name,qty,unit,updated_at,perish_by,use_soon')
+  .eq('user_id', uid),
     supabase.from('preferences').select('*').eq('user_id', uid).maybeSingle(),
   ]);
 
   const pantryRows: PantryRow[] = (pItems.data || []).map((x) => ({
-    name: String(x.name).toLowerCase(),
-    updated_at: x.updated_at || new Date(0).toISOString(),
-    perish_by: x.perish_by ?? null,
-  }));
+  name: String(x.name).toLowerCase(),
+  qty: Number(x.qty ?? 1) || 1,
+  unit: String(x.unit ?? 'unit'),
+  updated_at: x.updated_at || new Date(0).toISOString(),
+  perish_by: x.perish_by ?? null,
+  use_soon: !!(x as { use_soon?: boolean }).use_soon,
+}));
   setPantry(pantryRows);
 
   const pr = (pRes.data ?? null) as PrefsRow | null;
@@ -632,7 +746,6 @@ const refreshPantryAndPrefs = useCallback(async () => {
         allergies: pr.allergies ?? [],
         dislikes: pr.disliked_ingredients ?? [],
         max_prep_minutes: pr.max_prep_time ?? 45,
-        budget_level: pr.budget_level ?? 'medium',
         favorite_mode: pr.favorite_mode === 'favorites' ? 'favorites' : 'variety',
         healthy_whole_food: pr.healthy_whole_food ?? false,
         kid_friendly: pr.kid_friendly ?? false,
@@ -648,7 +761,6 @@ const refreshPantryAndPrefs = useCallback(async () => {
         allergies: [],
         dislikes: [],
         max_prep_minutes: 45,
-        budget_level: 'medium',
         favorite_mode: 'variety',
         healthy_whole_food: false,
         kid_friendly: false,
@@ -693,56 +805,95 @@ useEffect(() => {
   }, [ings]);
 
   // Build a fast lookup for perish-by dates from the pantry
-  const pantryPerishBy = useMemo(() => {
-    const m = new Map<string, Date>();
-    pantry.forEach((p) => {
-      if (!p.perish_by) return;
-      const ts = Date.parse(p.perish_by);
-      if (Number.isNaN(ts)) return;
-      m.set(p.name.toLowerCase(), new Date(ts));
-    });
-    return m;
-  }, [pantry]);
+const pantryPerishBy = useMemo(() => {
+  const m = new Map<string, Date>();
+  pantry.forEach((p) => {
+    if (!p.perish_by) return;
+    const ts = Date.parse(p.perish_by);
+    if (Number.isNaN(ts)) return;
+    m.set(normalizeIngredientName(p.name), new Date(ts));
+  });
+  return m;
+}, [pantry]);
 
-  // Recompute shopping list from chosen meals + current pantry (Smart List v1)
+// Build a fast lookup for "use soon" pantry items (normalized)
+const pantryUseSoon = useMemo(() => {
+  const s = new Set<string>();
+  pantry.forEach((p) => {
+    if (p.use_soon) s.add(normalizeIngredientName(p.name));
+  });
+  return s;
+}, [pantry]);
+
   const recomputeShopping = useCallback(
-    (chosen: Recipe[]) => {
-      const pantrySet = new Set(pantry.map((p) => normalizeIngredientName(p.name)));
-      const rawNeeds: RawNeed[] = [];
+  (chosen: Recipe[]) => {
+    const rawNeeds: RawNeed[] = [];
 
-      for (const r of chosen) {
-  const ri = ingByRecipe.get(r.id) || [];
+    for (const r of chosen) {
+      const ri = ingByRecipe.get(r.id) || [];
 
-  const baseServings = r.servings ?? 2; // DB default is 2; keep safe fallback
-  const multiplier = baseServings > 0 ? peopleCount / baseServings : 1;
+      const baseServings = r.servings ?? 2; // DB default is 2; keep safe fallback
+      const multiplier = baseServings > 0 ? peopleCount / baseServings : 1;
 
-  for (const it of ri) {
-    const ingNorm = normalizeIngredientName(it.name);
-   if (pantrySet.has(ingNorm)) continue;
+      for (const it of ri) {
+        const ingNorm = normalizeIngredientName(it.name);
 
-    // Skip pantry staples (salt/pepper etc.)
-   if (STAPLE_SKIP.has(ingNorm)) continue;
+        // Skip pantry staples (salt/pepper etc.)
+        if (STAPLE_SKIP.has(ingNorm)) continue;
 
-    // Staples and garnish: we decided to exclude optional items from shopping list
-   if (it.optional) continue;
+        // Staples and garnish: we decided to exclude optional items from shopping list
+        if (it.optional) continue;
 
-    const baseQty = it.qty ?? 1;
-    const scaledQty = baseQty * multiplier;
+        const baseQty = it.qty ?? 1;
+        const scaledQty = baseQty * multiplier;
 
-    rawNeeds.push({
-      name: it.name,
-      qty: scaledQty,
-      unit: it.unit ?? null,
+        rawNeeds.push({
+          name: it.name,
+          qty: scaledQty,
+          unit: it.unit ?? null,
+        });
+      }
+    }
+
+    const remainingNeeds = subtractPantryFromNeeds(
+      rawNeeds,
+      pantry.map((p) => ({
+        name: p.name,
+        qty: p.qty,
+        unit: p.unit,
+      })),
+    );
+
+    // Apply substitutions (pantry-aware swaps) before merging.
+    // Block substitutions that conflict with allergies/dislikes.
+    const blocked = new Set<string>();
+    try {
+      // Dislikes
+      for (const d of prefs?.dislikes ?? []) {
+        const n = normalizeIngredientName(String(d));
+        if (n) blocked.add(n);
+      }
+      // Allergies (expanded into concrete ingredient terms)
+      for (const t of Array.from(expandAllergyTerms(prefs?.allergies ?? []))) {
+        const n = normalizeIngredientName(String(t));
+        if (n) blocked.add(n);
+      }
+    } catch {
+      // best-effort only
+    }
+
+    // Apply substitutions, but ALWAYS keep the original item in the list
+    // and attach a note when a pantry substitution is available.
+    const pantryNames = pantry.map((p) => normalizeIngredientName(p.name));
+    const { items } = smartMergeNeedsWithSubstitutions(remainingNeeds, pantryNames, {
+      blocked,
+      keepOriginalInList: true,
     });
-  }
-}
 
-      const merged = smartMergeNeeds(rawNeeds);
-      setShopping(merged);
-    },
-    [ingByRecipe, pantry, peopleCount],
-  );
-
+    setShopping(items);
+  },
+  [ingByRecipe, pantry, peopleCount, prefs],
+);
   // Keep shopping list in sync when meals or ingredients change
   useEffect(() => {
     if (mealsN.length) recomputeShopping(mealsN);
@@ -756,14 +907,15 @@ useEffect(() => {
 
       const [pItems, pRes, rRes, iRes, favRes] = await Promise.all([
         supabase
-          .from('pantry_items')
-          .select('name,updated_at,perish_by')
-          .eq('user_id', uid),
+        .from('pantry_items')
+        .select('name,qty,unit,updated_at,perish_by,use_soon')
+        .eq('user_id', uid),
         supabase.from('preferences').select('*').eq('user_id', uid).maybeSingle(),
         supabase
           .from('recipes')
           .select('id,title,time_min,diet_tags,instructions,servings')
-          .eq('is_active', true),
+          .eq('is_active', true)
+          .eq('qa_status', 'approved'),
         supabase
           .from('recipe_ingredients')
           .select('recipe_id,name,qty,unit,optional'),
@@ -771,9 +923,12 @@ useEffect(() => {
       ]);
 
       const pantryRows: PantryRow[] = (pItems.data || []).map((x) => ({
-        name: String(x.name).toLowerCase(),
-        updated_at: x.updated_at || new Date(0).toISOString(),
-        perish_by: x.perish_by ?? null,
+      name: String(x.name).toLowerCase(),
+      qty: Number(x.qty ?? 1) || 1,
+      unit: String(x.unit ?? 'unit'),
+      updated_at: x.updated_at || new Date(0).toISOString(),
+      perish_by: x.perish_by ?? null,
+      use_soon: !!(x as { use_soon?: boolean }).use_soon,
       }));
       setPantry(pantryRows);
 
@@ -785,7 +940,6 @@ useEffect(() => {
             allergies: pr.allergies ?? [],
             dislikes: pr.disliked_ingredients ?? [],
             max_prep_minutes: pr.max_prep_time ?? 45,
-            budget_level: pr.budget_level ?? 'medium',
             favorite_mode:
               pr.favorite_mode === 'favorites' ? 'favorites' : 'variety',
             healthy_whole_food: pr.healthy_whole_food ?? false,
@@ -804,7 +958,6 @@ useEffect(() => {
             allergies: [],
             dislikes: [],
             max_prep_minutes: 45,
-            budget_level: 'medium',
             favorite_mode: 'variety',
             healthy_whole_food: false,
             kid_friendly: false,
@@ -884,13 +1037,15 @@ useEffect(() => {
   // Generate a fresh 7-day dinner plan and persist it
     const generateAndSave = useCallback(async () => {
     if (!prefs || !userId) return;
-    trackEvent('generate_plan_click');
-
+    const prefsSafe = prefs;
+    
     // Prevent duplicate generations (double click, re-entrancy, slow network)
     if (generatingRef.current) {
       console.log('[PLAN] generateAndSave ignored (already running)');
       return;
     }
+
+    trackEvent('generate_plan_click');
     generatingRef.current = true;
     setGenerating(true);
 
@@ -916,7 +1071,7 @@ useEffect(() => {
     if (prefs.healthy_whole_food || prefs.kid_friendly) {
       healthyProfile = {
         ...DEFAULT_HEALTHY_WHOLE_FOOD_PROFILE,
-        wholeFoodFocus: prefs.healthy_whole_food ?? true,
+        wholeFoodFocus: !!prefs.healthy_whole_food || !!prefs.kid_friendly,
         kidFriendly: prefs.kid_friendly,
       };
 
@@ -948,7 +1103,37 @@ useEffect(() => {
     }
 
     const allergy = expandAllergyTerms(prefs.allergies || []);
-    const dislike = new Set((prefs.dislikes || []).map((d) => d.toLowerCase()));    
+    const dislike = new Set((prefs.dislikes || []).map((d) => String(d)));
+
+    // Normalize sets once for consistent matching
+    const allergyTermsNorm = normalizeTermSet(allergy);
+    const dislikeTermsNorm = normalizeTermSet(dislike);
+
+    // --- DEBUG: why a use-soon item (e.g. mushroom) didn't show up ---
+    // This is safe to keep (console-only) and helps confirm whether an ingredient
+    // is being excluded by dislikes/allergies, or simply not present in recipes.
+    if (DEBUG_PLAN) {
+      try {
+        const dbgMushNorm = normalizeTermSet(['mushroom', 'mushrooms']);
+        console.log('[PLAN DEBUG] prefs.dislikes (raw):', prefs.dislikes);
+        console.log(
+          '[PLAN DEBUG] dislikeTermsNorm has mushroom?:',
+          dbgMushNorm.size > 0 &&
+            Array.from(dbgMushNorm).some((t) => dislikeTermsNorm.has(t)),
+        );
+        console.log(
+          '[PLAN DEBUG] pantryUseSoon (sample):',
+          Array.from(pantryUseSoon).slice(0, 25),
+        );
+        console.log(
+          '[PLAN DEBUG] pantryUseSoon has mushroom?:',
+          Array.from(dbgMushNorm).some((t) => pantryUseSoon.has(t)),
+        );
+      } catch (e) {
+        console.warn('[PLAN DEBUG] debug block failed:', e);
+      }
+    }
+
     const pantrySet = new Set(pantry.map((p) => normalizeIngredientName(p.name)));
 
     // Build ingredient index (same as before)
@@ -969,8 +1154,18 @@ useEffect(() => {
         /\bsausage\b/i,
         /\bbacon\b/i,
         /\bturkey\b/i,
+        // seafood/fish
         /\bshrimp\b/i,
         /\banchovies?\b/i,
+        /\bsalmon\b/i,
+        /\btuna\b/i,
+        /\bcod\b/i,
+        /\btilapia\b/i,
+        /\btrout\b/i,
+        /\bhalibut\b/i,
+        /\bmahi\b/i,
+        /\bseafood\b/i,
+        /\bfish\b/i,
       ],
       vegan: [
         /\bchicken\b/i,
@@ -980,8 +1175,19 @@ useEffect(() => {
         /\bsausage\b/i,
         /\bbacon\b/i,
         /\bturkey\b/i,
+        // seafood/fish
         /\bshrimp\b/i,
         /\banchovies?\b/i,
+        /\bsalmon\b/i,
+        /\btuna\b/i,
+        /\bcod\b/i,
+        /\btilapia\b/i,
+        /\btrout\b/i,
+        /\bhalibut\b/i,
+        /\bmahi\b/i,
+        /\bseafood\b/i,
+        /\bfish\b/i,
+        // animal products
         /\beggs?\b/i,
         /\bcheese\b/i,
         /\bmilk\b/i,
@@ -990,23 +1196,23 @@ useEffect(() => {
       ],
     };
 
-    function violatesDiet(ri: Ing[], diet: string): boolean {
+    function violatesDiet(recipe: Recipe, ri: Ing[], diet: string): boolean {
       const rules = DIET_FORBIDDEN_BY_ING[diet] || [];
       if (!rules.length) return false;
-      return ri.some((it) => rules.some((rx) => rx.test(it.name)));
+      return recipeMatchesAnyRegex(recipe, ri, rules);
     }
 
-    function hasForbiddenFromSet(ri: Ing[], terms: Set<string>): boolean {
-      if (!terms.size) return false;
-      return ri.some((it) => hasAnyTerm(it.name, terms));
+    function hasForbiddenFromSet(ri: Ing[], termsNorm: Set<string>): boolean {
+      if (!termsNorm.size) return false;
+      return ri.some((it) => matchesAnyNormalizedTerm(it.name, termsNorm));
     }
 
     const filteredRecipes: Recipe[] = recipes.filter((r) => {
       const ri = ingIndex.get(r.id) || [];
 
-      if (violatesDiet(ri, prefs.diet)) return false;
-      if (hasForbiddenFromSet(ri, allergy)) return false;
-      if (hasForbiddenFromSet(ri, dislike)) return false;
+      if (violatesDiet(r, ri, prefs.diet)) return false;
+      if (hasForbiddenFromSet(ri, allergyTermsNorm)) return false;
+      if (hasForbiddenFromSet(ri, dislikeTermsNorm)) return false;
 
       return true;
     });
@@ -1019,6 +1225,41 @@ useEffect(() => {
     }
 
     const strictPool: Recipe[] = pool; // strict-only: never relax constraints
+
+    if (DEBUG_PLAN && prefs.diet !== 'none') {
+      const violatingTitles = strictPool
+        .filter((r) => violatesDiet(r, ingIndex.get(r.id) || [], prefs.diet))
+        .map((r) => r.title);
+
+      console.log('[PLAN DEBUG] strictPool diet check:', {
+        diet: prefs.diet,
+        strictPoolCount: strictPool.length,
+        violatingTitles: violatingTitles.slice(0, 25),
+      });
+    }
+
+    // --- DEBUG: do we even have eligible recipes that contain mushrooms? ---
+    if (DEBUG_PLAN) {
+      try {
+        const dbgMushNorm = normalizeTermSet(['mushroom', 'mushrooms']);
+        const mushEligible = strictPool.filter((r) => {
+          const ri = ingIndex.get(r.id) || [];
+          return ri.some((it) => matchesAnyNormalizedTerm(it.name, dbgMushNorm));
+        });
+        console.log(
+          '[PLAN DEBUG] eligible recipes containing mushroom:',
+          mushEligible.length,
+        );
+        if (mushEligible.length) {
+          console.log(
+            '[PLAN DEBUG] mushroom recipe titles (first 10):',
+            mushEligible.slice(0, 10).map((r) => r.title),
+          );
+        }
+      } catch (e) {
+        console.warn('[PLAN DEBUG] mushroom eligibility check failed:', e);
+      }
+    }
 
     let chosen: Recipe[] | null = null;
     let mode: 'llm' | 'heuristic' | null = null;
@@ -1046,13 +1287,12 @@ useEffect(() => {
           allergies: prefs.allergies,
           dislikes: prefs.dislikes,
           max_prep_minutes: prefs.max_prep_minutes,
-          budget_level: prefs.budget_level,
-          // favorite_mode: prefs.favorite_mode,
-          // healthy_whole_food: prefs.healthy_whole_food,
-          // kid_friendly: prefs.kid_friendly,
-          // healthy_goal: prefs.healthy_goal,
-          // healthy_protein_style: prefs.healthy_protein_style,
-          // healthy_carb_pref: prefs.healthy_carb_pref,
+          favorite_mode: prefs.favorite_mode,
+          healthy_whole_food: prefs.healthy_whole_food,
+          kid_friendly: prefs.kid_friendly,
+          healthy_goal: prefs.healthy_goal,
+          healthy_protein_style: prefs.healthy_protein_style,
+          healthy_carb_pref: prefs.healthy_carb_pref,
         },
         recipes: recipeLite,
         days: dinnersPerWeek,
@@ -1068,31 +1308,14 @@ useEffect(() => {
         nowTs - lastPlanReqAtRef.current < tooSoonMs
       ) {
         console.log('[PLAN] Skipping LLM call: identical inputs too soon');
+        trackEvent('generate_plan_skipped_identical_too_soon');
         return;
       }
 
       const res = await fetch('/api/llm-plan', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          pantryNames,
-          prefs: {
-            diet: prefs.diet,
-            allergies: prefs.allergies,
-            dislikes: prefs.dislikes,
-            max_prep_minutes: prefs.max_prep_minutes,
-            budget_level: prefs.budget_level,
-   //            favorite_mode: prefs.favorite_mode,
-   //            healthy_whole_food: prefs.healthy_whole_food,
-   //            kid_friendly: prefs.kid_friendly,
-   //            healthy_goal: prefs.healthy_goal,
-   //            healthy_protein_style: prefs.healthy_protein_style,
-   //            healthy_carb_pref: prefs.healthy_carb_pref,
-          },
-          recipes: recipeLite,
-          days: dinnersPerWeek,
-          healthyProfile, // may be undefined → omitted on JSON.stringify
-        }),
+        body: JSON.stringify(llmPayload),
       });
 
       if (res.ok) {
@@ -1105,13 +1328,13 @@ useEffect(() => {
             .filter((r): r is Recipe => !!r);
 
           if (picked.length) {
-            const finalPicked = picked.filter((r) => {
-              const ri = ingIndex.get(r.id) || [];
-              if (violatesDiet(ri, prefs.diet)) return false;
-              if (hasForbiddenFromSet(ri, allergy)) return false;
-              if (hasForbiddenFromSet(ri, dislike)) return false;
-              return true;
-            });
+          const finalPicked = picked.filter((r) => {
+            const ri = ingIndex.get(r.id) || [];
+            if (violatesDiet(r, ri, prefs.diet)) return false;
+            if (hasForbiddenFromSet(ri, allergyTermsNorm)) return false;
+            if (hasForbiddenFromSet(ri, dislikeTermsNorm)) return false;
+            return true;
+          });
 
             chosen = finalPicked.length ? finalPicked : picked;
             setPlannerMode('llm');
@@ -1132,52 +1355,143 @@ useEffect(() => {
       console.error('[PLAN] LLM plan failed (falling back to heuristic):', e);
     }
 
-    // ---------- 2) Fallback: heuristic ----------
+    // ---------- 2) Fallback: pantry-first heuristic ----------
     if (!chosen || !chosen.length) {
-      const scored = pool
-        .map((r) => {
-          const ri = ingIndex.get(r.id) || [];
-          let score = 0;
+      type RecipeStats = {
+        id: string;
+        coverage: number;
+        matchedWeight: number;
+        totalWeight: number;
+        missingWeighted: number;
+        missingSet: Set<string>; // normalized missing non-staples, non-optional
+        mustUseHits: number;
+        baseScore: number;
+      };
 
-          // 1) Prefer faster recipes
-          score += r.time_min <= (prefs.max_prep_minutes ?? 45) ? 2 : -2;
+      // Build "must use" set from pantry items that are explicitly flagged OR expiring soon.
+      // (V1: treat perish-by within 3 days as must-use.)
+      const mustUseSet = new Set<string>(Array.from(pantryUseSoon));
+      for (const [nameNorm, d] of pantryPerishBy.entries()) {
+        try {
+          if (daysUntil(d) <= 3) mustUseSet.add(nameNorm);
+        } catch {
+          // ignore
+        }
+      }
 
-          // 2) Diet tag boost
-          if (
-            prefs.diet !== 'none' &&
-            (r.diet_tags || []).includes(prefs.diet)
-          ) {
-            score += 1;
+      function computeStats(r: Recipe): RecipeStats {
+        const ri = (ingIndex.get(r.id) || []).filter((it) => !it.optional);
+        const ingNorms = ri.map((it) => normalizeIngredientName(it.name));
+
+        let totalWeight = 0;
+        let matchedWeight = 0;
+        let missingWeighted = 0;
+        const missingSet = new Set<string>();
+        let mustUseHits = 0;
+
+        for (const n of ingNorms) {
+          if (!n) continue;
+
+          const w = ingredientWeight(n);
+          totalWeight += w;
+
+          const inPantry = pantrySet.has(n);
+          if (inPantry) {
+            matchedWeight += w;
+            if (mustUseSet.has(n)) mustUseHits += 1;
+            continue;
           }
 
-          // 3) Pantry usage / avoid allergens / dislikes
-          for (const it of ri) {
-         const ingNorm = normalizeIngredientName(it.name);
+          // Missing: ignore staples and do not add to shopping-friction penalty
+          if (STAPLE_SKIP.has(n)) continue;
 
-         if (pantrySet.has(ingNorm)) score += 1;
+          missingWeighted += w;
+          missingSet.add(n);
+        }
 
-         // allergy/dislike matching should also use normalized checks
-         if (hasAnyTerm(it.name, allergy)) return { r, score: -999, ri };
-         if (hasAnyTerm(it.name, dislike)) score -= 2;
-         }
+        const coverage = totalWeight > 0 ? matchedWeight / totalWeight : 0;
 
-          // 4) Favorites weighting
-          if (favorites.has(r.id)) {
-            score += prefs.favorite_mode === 'favorites' ? 6 : 1;
+        // Time preference (soft): keep it simple in V1
+        const timeScore =
+        r.time_min <= (prefsSafe.max_prep_minutes ?? 45) ? 1.5 : -2;
+
+        // Favorites boost
+        const favBoost = favorites.has(r.id)
+        ? prefsSafe.favorite_mode === 'favorites'
+        ? 4
+        : 1
+        : 0;
+
+        // Must-use boost (waste reduction)
+        const mustUseBoost = mustUseHits * 2.5;
+
+        // Pantry-first score
+        // - Coverage dominates
+        // - Missing ingredients (weighted) penalized
+        const baseScore = coverage * 10 - missingWeighted * 1.5 + mustUseBoost + favBoost + timeScore;
+
+        return {
+          id: r.id,
+          coverage,
+          matchedWeight,
+          totalWeight,
+          missingWeighted,
+          missingSet,
+          mustUseHits,
+          baseScore,
+        };
+      }
+
+      // Precompute stats for all candidates
+      const statsById = new Map<string, RecipeStats>();
+      for (const r of pool) statsById.set(r.id, computeStats(r));
+
+      const picked: Recipe[] = [];
+      const weekMissing = new Set<string>();
+
+      // Greedy week selection:
+      // 1) pick best baseScore
+      // 2) for subsequent picks, penalize introducing new missing items not already on the week's list
+      for (let k = 0; k < dinnersPerWeek; k++) {
+        let best: { r: Recipe; score: number } | null = null;
+
+        for (const r of pool) {
+          // Avoid duplicates until we have to fill with repeats later
+          if (picked.some((p) => p.id === r.id)) continue;
+
+          const st = statsById.get(r.id);
+          if (!st) continue;
+
+          // Week-level penalty for introducing brand new missing items
+          let newMissingCount = 0;
+          for (const m of st.missingSet) {
+            if (!weekMissing.has(m)) newMissingCount += 1;
           }
 
-          return { r, score, ri };
-        })
-        .filter((x) => x.score > -500)
-        .sort((a, b) => b.score - a.score);
+          const weekPenalty = newMissingCount * 0.75;
+          const score = st.baseScore - weekPenalty;
 
-      const fallbackChosen = scored.slice(0, dinnersPerWeek).map((x) => x.r);
-      chosen = fallbackChosen;
+          if (!best || score > best.score) best = { r, score };
+        }
+
+        if (!best) break;
+
+        picked.push(best.r);
+
+        // Accumulate missing set for the week
+        const st = statsById.get(best.r.id);
+        if (st) {
+          for (const m of st.missingSet) weekMissing.add(m);
+        }
+      }
+
+      chosen = picked;
       setPlannerMode('heuristic');
       mode = 'heuristic';
+
       console.log(
-        '[PLAN] Using heuristic-selected recipes (fallback):',
-        fallbackChosen.map((p) => p.title),
+        '[PLAN] Using pantry-first heuristic-selected recipes (fallback):',
+        chosen.map((p) => p.title),
       );
     }
 
@@ -1187,43 +1501,744 @@ useEffect(() => {
     }
 
     // ---------- 2.5) Perishables-first ordering ----------
-    const withPerishableScore = chosen.map((r) => {
-      const ri = ingIndex.get(r.id) || [];
-      const ingredientNames = ri.map((it) => it.name);
+// Priority order:
+// 1) Recipes that consume any pantry items marked "use soon"
+// 2) Then recipes with the most urgent perishability (date-based or heuristic)
+const withPerishableScore = chosen.map((r) => {
+  const ri = ingIndex.get(r.id) || [];
+  const riNonOpt = ri.filter((it) => !it.optional);
 
-      const heuristicScore = computeRecipePerishability(ingredientNames);
+  const ingredientNames = riNonOpt
+    .map((it) => normalizeIngredientName(it.name))
+    .filter(Boolean);
 
-      let dateScore: 1 | 2 | 3 | 4 = 1;
-      for (const it of ri) {
-        const pantryDate = pantryPerishBy.get(it.name.toLowerCase());
-        if (!pantryDate) continue;
-        const s = scoreFromPerishDate(pantryDate);
-        if (s > dateScore) dateScore = s;
-      }
+  // Use-soon match uses normalized ingredient names for consistency
+  const usesSoon = riNonOpt.some((it) =>
+    pantryUseSoon.has(normalizeIngredientName(it.name)),
+  );
 
-      const finalScore = dateScore > heuristicScore ? dateScore : heuristicScore;
+  const heuristicScore = computeRecipePerishability(ingredientNames);
 
-      return { recipe: r, perishability: finalScore };
-    });
+  let dateScore: 1 | 2 | 3 | 4 = 1;
+  for (const it of riNonOpt) {
+    const pantryDate = pantryPerishBy.get(normalizeIngredientName(it.name));
+    if (!pantryDate) continue;
+    const s = scoreFromPerishDate(pantryDate);
+    if (s > dateScore) dateScore = s;
+  }
 
-    withPerishableScore.sort((a, b) => b.perishability - a.perishability);
-    chosen = withPerishableScore.map((x) => x.recipe);
+  const perishability = dateScore > heuristicScore ? dateScore : heuristicScore;
+
+  return { recipe: r, usesSoon, perishability };
+});
+
+withPerishableScore.sort((a, b) => {
+  if (a.usesSoon !== b.usesSoon) return a.usesSoon ? -1 : 1;
+  return b.perishability - a.perishability;
+});
+
+chosen = withPerishableScore.map((x) => x.recipe);
 
     // Ensure we always save exactly dinnersPerWeek meals.
    // Repeats are allowed, but ONLY from the strict pool (no constraint relaxing).
    chosen = (chosen || []).slice(0, dinnersPerWeek);
 
     if (chosen.length < dinnersPerWeek) {
-   const seed =
-  reqKey ??
-  `${userId}|${recipePrefsSignature(prefs)}|${dinnersPerWeek}`;
-   chosen = fillPlanWithRepeats(chosen, dinnersPerWeek, strictPool, seed);
+      const seed =
+        reqKey ??
+        `${userId}|${recipePrefsSignature(prefs)}|${dinnersPerWeek}`;
+      chosen = fillPlanWithRepeats(chosen, dinnersPerWeek, strictPool, seed);
 
-   console.warn(
-    `[PLAN] Filled plan with repeats to reach ${dinnersPerWeek} meals. Final length:`,
-    chosen.length,
-   );
-   }
+      console.warn(
+        `[PLAN] Filled plan with repeats to reach ${dinnersPerWeek} meals. Final length:`,
+        chosen.length,
+      );
+    }
+
+    // ---------- 2.75) Balance veg vs non-veg (for omnivore users) ----------
+    // If the user did NOT request vegetarian/vegan, keep the week from skewing too plant-forward.
+    // This is a soft constraint: we replace excess veg meals with the best non-veg candidates.
+    const dietLower = String(prefsSafe.diet || '').toLowerCase();
+    const shouldBalanceNonVeg = dietLower !== 'vegetarian' && dietLower !== 'vegan';
+
+    // Heuristic: "non-veg" if any ingredient looks like meat/fish/seafood.
+    // Otherwise treat it as vegetarian-ish (includes egg/dairy meals).
+    const NON_VEG_ING_RE = /(\bchicken\b|\bbeef\b|\bpork\b|\bturkey\b|\blamb\b|\bveal\b|\bham\b|\bsausage\b|\bbacon\b|\bpepperoni\b|\bsalami\b|\bprosciutto\b|\banchovies?\b|\btuna\b|\bsalmon\b|\bshrimp\b|\bprawn\b|\bcrab\b|\blobster\b|\bclam\b|\bmussel\b|\boyster\b|\bscallop\b|\bfish\b)/i;
+
+    function isVegLikeRecipe(r: Recipe): boolean {
+      const tags = (r.diet_tags ?? []).map((t) => String(t).toLowerCase());
+      if (tags.includes('vegan') || tags.includes('vegetarian')) return true;
+
+      const ri = ingIndex.get(r.id) || [];
+      // If we see any non-veg ingredient keyword, treat as non-veg.
+      const hasNonVeg = ri.some((it) => NON_VEG_ING_RE.test(String(it.name)));
+      return !hasNonVeg;
+    }
+
+    function isNonVegRecipe(r: Recipe): boolean {
+      return !isVegLikeRecipe(r);
+    }
+
+    if (shouldBalanceNonVeg && chosen && chosen.length >= 3) {
+      // Allow up to 40% veg-like meals for omnivore users.
+      const maxVeg = Math.max(1, Math.floor(dinnersPerWeek * 0.4));
+
+      let vegCount = chosen.reduce((acc, r) => acc + (isVegLikeRecipe(r) ? 1 : 0), 0);
+
+      if (vegCount > maxVeg) {
+        // Build a replacement pool of non-veg recipes from the strict pool.
+        // Keep it deterministic: sort by id.
+        const nonVegCandidates = (strictPool || [])
+          .filter((r) => !!r?.id)
+          .filter((r) => isNonVegRecipe(r))
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id));
+
+        // Track ids already used; we prefer variety but allow repeats if needed.
+        const usedCounts = new Map<string, number>();
+        for (const r of chosen) usedCounts.set(r.id, (usedCounts.get(r.id) ?? 0) + 1);
+
+        function pickReplacement(): Recipe | null {
+          // First pass: avoid duplicates when possible
+          for (const r of nonVegCandidates) {
+            if ((usedCounts.get(r.id) ?? 0) === 0) return r;
+          }
+          // Second pass: allow repeats
+          return nonVegCandidates[0] ?? null;
+        }
+
+        // Replace from the END of the week so perishables-first ordering stays mostly intact.
+        const updated = chosen.slice();
+        for (let i = updated.length - 1; i >= 0 && vegCount > maxVeg; i--) {
+          const r = updated[i];
+          if (!isVegLikeRecipe(r)) continue;
+
+          const repl = pickReplacement();
+          if (!repl) break;
+
+          // If replacement is the same id, we still accept it (repeats allowed),
+          // but try to not do pointless swaps.
+          if (repl.id === r.id) break;
+
+          updated[i] = repl;
+          // bookkeeping
+          usedCounts.set(repl.id, (usedCounts.get(repl.id) ?? 0) + 1);
+          vegCount -= 1;
+        }
+
+        chosen = updated;
+        console.log('[PLAN] Balanced week (veg-like capped):', {
+          maxVeg,
+          vegCount,
+          titles: chosen.map((x) => x.title),
+        });
+      }
+    }
+
+    // ---------- 2.8) Protein variety (avoid too many chicken meals) ----------
+    // Best-effort: keep any single protein category from dominating the week.
+    // This runs only for omnivore users (not vegetarian/vegan).
+    if (shouldBalanceNonVeg && chosen && chosen.length >= 3) {
+      type ProteinCat =
+        | 'chicken'
+        | 'turkey'
+        | 'beef'
+        | 'lamb'
+        | 'pork'
+        | 'fish'
+        | 'seafood'
+        | 'plant'
+        | 'other';
+
+      // Preference order for classifying a recipe when multiple proteins appear.
+      // (We prefer fish/seafood first, then red meats, then poultry.)
+      const CAT_ORDER: ProteinCat[] = [
+        'fish',
+        'seafood',
+        'beef',
+        'lamb',
+        'pork',
+        'turkey',
+        'chicken',
+        'plant',
+        'other',
+      ];
+
+      // Match both single-word proteins and common multi-word phrases like
+      // "ground turkey" / "ground lamb" / "ground beef".
+      const CAT_RE: Record<ProteinCat, RegExp> = {
+        chicken: /\b(chicken|ground\s+chicken|drumsticks?|thighs?|breasts?|wings?)\b/i,
+        turkey: /\b(turkey|ground\s+turkey)\b/i,
+        beef: /\b(beef|steak|sirloin|brisket|ground\s+beef)\b/i,
+        lamb: /\b(lamb|mutton|ground\s+lamb|lamb\s+chops?|leg\s+of\s+lamb)\b/i,
+        pork: /\b(pork|bacon|ham|sausage|prosciutto|pancetta|ground\s+pork)\b/i,
+        // Avoid classifying "fish sauce" as a fish protein.
+        fish: /\b(salmon|tuna|cod|tilapia|trout|halibut|mahi(?:\s+mahi)?|snapper|sardines?|pollock|bass)\b/i,
+        seafood: /\b(shrimp|prawns?|crab|lobster|clams?|mussels?|oysters?|scallops?|seafood)\b/i,
+        plant: /\b(tofu|tempeh|lentils?|beans|chickpeas?|edamame|seitan|tvp)\b/i,
+        other: /.^/,
+      };
+
+      function recipeProteinCat(r: Recipe): ProteinCat {
+        const ri = ingIndex.get(r.id) || [];
+        const names = ri.map((it) => String(it.name).replace(/\s+/g, ' ').trim());
+
+        // Prefer explicit matches first
+        for (const cat of CAT_ORDER) {
+          if (cat === 'other') continue;
+          const rx = CAT_RE[cat];
+          if (names.some((n) => rx.test(n))) return cat;
+        }
+
+        // If it was classified as veg-like earlier, treat as plant/other.
+        return isVegLikeRecipe(r) ? 'plant' : 'other';
+      }
+
+      const maxPerCat = Math.max(1, Math.ceil(dinnersPerWeek * 0.4));
+
+      const counts = new Map<ProteinCat, number>();
+      for (const r of chosen) {
+        const c = recipeProteinCat(r);
+        counts.set(c, (counts.get(c) ?? 0) + 1);
+      }
+
+      function isOverCap(cat: ProteinCat) {
+        const c = counts.get(cat) ?? 0;
+        return c > maxPerCat;
+      }
+
+      const updated = chosen.slice();
+      const usedIds = new Set(updated.map((r) => r.id));
+
+      function pickReplacement(avoidCat: ProteinCat): Recipe | null {
+        // Candidate pool: strictPool already respects diet/allergy/dislike.
+        // Prefer non-veg replacements so this pass doesn't re-introduce a veg-heavy week.
+        const allCandidates = (strictPool || [])
+          .filter((r) => !!r?.id)
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id));
+
+        const nonVegCandidates = allCandidates.filter((r) => isNonVegRecipe(r));
+
+        // Helper: try to find a candidate with optional constraints.
+        function tryPick(
+          candidates: Recipe[],
+          opts: { requireUnderCap: boolean; requireNew: boolean },
+        ): Recipe | null {
+          for (const r of candidates) {
+            const c = recipeProteinCat(r);
+            if (c === avoidCat) continue;
+            if (opts.requireUnderCap && (counts.get(c) ?? 0) >= maxPerCat) continue;
+            if (opts.requireNew && usedIds.has(r.id)) continue;
+            return r;
+          }
+          return null;
+        }
+
+        // 1) Best: non-veg, under-cap, and new to the week
+        let repl = tryPick(nonVegCandidates, { requireUnderCap: true, requireNew: true });
+        if (repl) return repl;
+
+        // 2) Next: non-veg, under-cap (allow repeats)
+        repl = tryPick(nonVegCandidates, { requireUnderCap: true, requireNew: false });
+        if (repl) return repl;
+
+        // 3) Next: non-veg, any category (still avoid avoidCat), prefer new
+        repl = tryPick(nonVegCandidates, { requireUnderCap: false, requireNew: true });
+        if (repl) return repl;
+
+        // 4) Fallback: any recipe (including plant), under-cap, prefer new
+        repl = tryPick(allCandidates, { requireUnderCap: true, requireNew: true });
+        if (repl) return repl;
+
+        // 5) Last resort: any recipe not in avoidCat
+        repl = tryPick(allCandidates, { requireUnderCap: false, requireNew: false });
+        return repl;
+      }
+
+      // If chicken dominates, reduce it first. Otherwise reduce any category over cap.
+      const priorityCats: ProteinCat[] = ['chicken', ...CAT_ORDER.filter((c) => c !== 'chicken')];
+
+      for (const overCat of priorityCats) {
+        // Keep swapping until that category is within cap (or no replacements exist)
+        while (isOverCap(overCat)) {
+          let swapped = false;
+
+          // Replace from the END so perishables-first ordering stays mostly intact.
+          for (let i = updated.length - 1; i >= 0; i--) {
+            const r = updated[i];
+            const cat = recipeProteinCat(r);
+            if (cat !== overCat) continue;
+
+            const repl = pickReplacement(overCat);
+            if (!repl) break;
+            if (repl.id === r.id) break;
+
+            // Update counts
+            counts.set(overCat, (counts.get(overCat) ?? 1) - 1);
+            const newCat = recipeProteinCat(repl);
+            counts.set(newCat, (counts.get(newCat) ?? 0) + 1);
+
+            updated[i] = repl;
+            usedIds.add(repl.id);
+            swapped = true;
+
+            // Check again (while loop)
+            break;
+          }
+
+          if (!swapped) break;
+        }
+      }
+
+      chosen = updated;
+      console.log('[PLAN] Protein variety pass:', {
+        maxPerCat,
+        counts: Object.fromEntries(counts.entries()),
+        titles: chosen.map((x) => x.title),
+      });
+    }
+
+    // ---------- 2.85) Protein adjacency smoothing (avoid back‑to‑back same protein family) ----------
+    // Goal: avoid consecutive dinners with the same protein *family*
+    // Constraints:
+    // - Deterministic (stable scan, no randomness)
+    // - Preserve perishables-first intent (do not swap across use‑soon boundaries)
+    // - Applies to ALL protein types (not just chicken)
+    // - Fish + seafood are treated as the same family
+
+    if (shouldBalanceNonVeg && chosen && chosen.length >= 3) {
+      // Local classifier (kept inside this block so no types leak outside)
+      const CAT_ORDER = [
+        'fish',
+        'seafood',
+        'beef',
+        'lamb',
+        'pork',
+        'turkey',
+        'chicken',
+        'plant',
+        'other',
+      ] as const;
+
+      const CAT_RE: Record<(typeof CAT_ORDER)[number], RegExp> = {
+        chicken: /\b(chicken|ground\s+chicken|drumsticks?|thighs?|breasts?|wings?)\b/i,
+        turkey: /\b(turkey|ground\s+turkey)\b/i,
+        beef: /\b(beef|steak|sirloin|brisket|ground\s+beef)\b/i,
+        lamb: /\b(lamb|mutton|ground\s+lamb|lamb\s+chops?|leg\s+of\s+lamb)\b/i,
+        pork: /\b(pork|bacon|ham|sausage|prosciutto|pancetta|ground\s+pork)\b/i,
+        // Avoid classifying "fish sauce" as a fish protein.
+        fish: /\b(salmon|tuna|cod|tilapia|trout|halibut|mahi(?:\s+mahi)?|snapper|sardines?|pollock|bass)\b/i,
+        seafood: /\b(shrimp|prawns?|crab|lobster|clams?|mussels?|oysters?|scallops?|seafood)\b/i,
+        plant: /\b(tofu|tempeh|lentils?|beans|chickpeas?|edamame|seitan|tvp)\b/i,
+        other: /.^/,
+      };
+
+      function recipeProteinCatLocal(r: Recipe): (typeof CAT_ORDER)[number] {
+        const ri = ingIndex.get(r.id) || [];
+        const names = ri.map((it) => String(it.name).replace(/\s+/g, ' ').trim());
+
+        for (const cat of CAT_ORDER) {
+          if (cat === 'other') continue;
+          const rx = CAT_RE[cat];
+          if (names.some((n) => rx.test(n))) return cat;
+        }
+
+        return isVegLikeRecipe(r) ? 'plant' : 'other';
+      }
+
+      function proteinFamily(cat: (typeof CAT_ORDER)[number]): string {
+        // Treat fish + seafood as one adjacency family
+        if (cat === 'fish' || cat === 'seafood') return 'seafood_family';
+        return cat;
+      }
+
+      // Helper: does recipe use any pantry "use soon" ingredient?
+      function recipeUsesSoon(r: Recipe): boolean {
+      const ri = (ingIndex.get(r.id) || []).filter((it) => !it.optional);
+      return ri.some((it) => pantryUseSoon.has(normalizeIngredientName(it.name)));
+     }
+
+      const updated = chosen.slice();
+      const usesSoonFlags = updated.map((r) => recipeUsesSoon(r));
+
+      const updatedCats = updated.map((r) => recipeProteinCatLocal(r));
+      const updatedFams = updatedCats.map((c) => proteinFamily(c));
+
+      // Single left-to-right pass; bounded lookahead keeps this cheap + deterministic
+      for (let i = 1; i < updated.length; i++) {
+        if (updatedFams[i] !== updatedFams[i - 1]) continue;
+
+        const avoidFam = updatedFams[i];
+        let swapped = false;
+
+        // Look ahead a few positions for a safe swap
+        for (let j = i + 1; j < Math.min(updated.length, i + 4); j++) {
+          // Preserve perishables intent:
+          // do not move a "use soon" recipe behind a non‑use‑soon one (and vice versa)
+          if (usesSoonFlags[i] !== usesSoonFlags[j]) continue;
+
+          const famJ = updatedFams[j];
+          if (famJ === avoidFam) continue;
+
+          // Swap i <-> j
+          const tmp = updated[i];
+          updated[i] = updated[j];
+          updated[j] = tmp;
+
+          const tmpCat = updatedCats[i];
+          updatedCats[i] = updatedCats[j];
+          updatedCats[j] = tmpCat;
+
+          const tmpFam = updatedFams[i];
+          updatedFams[i] = updatedFams[j];
+          updatedFams[j] = tmpFam;
+
+          const tmpUse = usesSoonFlags[i];
+          usesSoonFlags[i] = usesSoonFlags[j];
+          usesSoonFlags[j] = tmpUse;
+
+          swapped = true;
+          break;
+        }
+
+        // Best-effort: if we couldn't fix it, leave as-is
+        if (!swapped) continue;
+      }
+
+      chosen = updated;
+
+      console.log('[PLAN] Protein adjacency smoothing applied:', {
+        families: updatedFams,
+        titles: chosen.map((r) => r.title),
+      });
+    }
+
+    // ---------- 2.9) Pantry "use soon" coverage guardrail (best-effort) ----------
+    // If a pantry item is flagged "use soon" but doesn't appear in ANY selected recipe,
+    // we will try to swap in a recipe that uses it — ONLY when the swap doesn't
+    // meaningfully worsen plan quality (shopping friction / time).
+    // Deterministic (stable candidate order) and respects perishables-first intent:
+    // we only swap within the same use-soon segment (true/false) to avoid reordering priorities.
+
+    if (chosen && chosen.length) {
+      // Base must-use terms (already normalized pantry strings)
+      const mustUseBase = new Set<string>(Array.from(pantryUseSoon || []));
+
+      // Cache per-recipe computed values for speed (deterministic)
+const missingSetCache = new Map<string, Set<string>>();
+const missingWeightedCache = new Map<string, number>();
+const coversAnyCache = new Map<string, boolean>();
+const coversBaseCache = new Map<string, Set<string>>(); // recipe.id -> set of mustUseBase terms it covers
+
+function getRecipeMissingSetCached(r: Recipe): Set<string> {
+  const key = r.id;
+  const hit = missingSetCache.get(key);
+  if (hit) return hit;
+  const s = recipeMissingSet(r);
+  missingSetCache.set(key, s);
+  return s;
+}
+
+function getRecipeMissingWeightedCached(r: Recipe): number {
+  const key = r.id;
+  const hit = missingWeightedCache.get(key);
+  if (hit != null) return hit;
+  const w = recipeMissingWeighted(r);
+  missingWeightedCache.set(key, w);
+  return w;
+}
+
+function getRecipeCoveredBasesCached(r: Recipe): Set<string> {
+  const key = r.id;
+  const hit = coversBaseCache.get(key);
+  if (hit) return hit;
+  const covered = new Set<string>();
+  for (const base of mustUseBase) {
+    if (recipeCoversBaseTerm(r, base)) covered.add(base);
+  }
+  coversBaseCache.set(key, covered);
+  return covered;
+}
+
+function getRecipeCoversAnyCached(r: Recipe): boolean {
+  const key = r.id;
+  const hit = coversAnyCache.get(key);
+  if (hit != null) return hit;
+  const v = getRecipeCoveredBasesCached(r).size > 0;
+  coversAnyCache.set(key, v);
+  return v;
+}
+
+// Week-level missing ingredient counts (a Set is incorrect because missing items can repeat across meals)
+function addMissingCounts(m: Map<string, number>, s: Set<string>) {
+  for (const k of s) m.set(k, (m.get(k) ?? 0) + 1);
+}
+function removeMissingCounts(m: Map<string, number>, s: Set<string>) {
+  for (const k of s) {
+    const next = (m.get(k) ?? 0) - 1;
+    if (next <= 0) m.delete(k);
+    else m.set(k, next);
+  }
+}
+
+      // Build a term-set (normalized) per base must-use ingredient.
+      // Use matchesAnyNormalizedTerm so we match phrases like "cremini mushrooms".
+      function termSetForBase(baseNorm: string): Set<string> {
+        const out = new Set<string>();
+        const b = normalizeIngredientName(baseNorm);
+        if (b) out.add(b);
+
+        // Simple plural/singular handling
+        if (b && b.endsWith('s') && b.length > 2) {
+          out.add(b.slice(0, -1));
+        } else if (b) {
+          out.add(`${b}s`);
+        }
+
+        return out;
+      }
+
+      const mustUseTermsByBase = new Map<string, Set<string>>();
+      for (const base of mustUseBase) {
+        mustUseTermsByBase.set(base, termSetForBase(base));
+      }
+
+      function recipeNormIngs(r: Recipe): string[] {
+        return (ingIndex.get(r.id) || [])
+          .filter((it) => !it.optional)
+          .map((it) => normalizeIngredientName(it.name))
+          .filter(Boolean);
+      }
+
+      function recipeMissingSet(r: Recipe): Set<string> {
+        const s = new Set<string>();
+        for (const n of recipeNormIngs(r)) {
+          if (!n) continue;
+          if (pantrySet.has(n)) continue;
+          if (STAPLE_SKIP.has(n)) continue;
+          s.add(n);
+        }
+        return s;
+      }
+
+      function recipeMissingWeighted(r: Recipe): number {
+        let wsum = 0;
+        for (const n of recipeNormIngs(r)) {
+          if (!n) continue;
+          if (pantrySet.has(n)) continue;
+          if (STAPLE_SKIP.has(n)) continue;
+          wsum += ingredientWeight(n);
+        }
+        return wsum;
+      }
+
+      function recipeCoversBaseTerm(r: Recipe, base: string): boolean {
+        const terms = mustUseTermsByBase.get(base) ?? new Set<string>();
+        if (!terms.size) return false;
+
+        const ri = (ingIndex.get(r.id) || []).filter((it) => !it.optional);
+        return ri.some((it) => matchesAnyNormalizedTerm(it.name, terms));
+      }
+
+      function coveredMustUseForPlan(planArr: Recipe[]): Set<string> {
+        const covered = new Set<string>();
+        for (const r of planArr) {
+          for (const base of mustUseBase) {
+            if (covered.has(base)) continue;
+            if (recipeCoversBaseTerm(r, base)) covered.add(base);
+          }
+        }
+        return covered;
+      }
+
+      // What base use-soon pantry items are already covered by the chosen recipes?
+      const coveredMustUse = coveredMustUseForPlan(chosen);
+
+      const missingMustUse = Array.from(mustUseBase)
+        .filter((n) => n && !coveredMustUse.has(n))
+        .sort((a, b) => a.localeCompare(b));
+
+      // If we have uncovered use-soon items, try to cover a few without harming plan quality.
+      if (missingMustUse.length) {
+        // Precompute week-level missing set for "new missing" penalty.
+        const weekMissingCounts = new Map<string, number>();
+        for (const r of chosen) {
+        addMissingCounts(weekMissingCounts, getRecipeMissingSetCached(r));
+        }
+
+        // Deterministic candidate list.
+        const strictSorted = (strictPool || [])
+          .filter((r) => !!r?.id)
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id));
+
+        // Swap quality guardrails.
+        const maxExtraMissingWeighted = 2.5; // allow a small increase in shopping friction
+        const maxNewMissingItems = 1; // allow at most 1 brand-new missing ingredient per forced swap
+        const maxExtraTimeMin = 10; // allow up to +10 minutes vs the replaced recipe
+
+        // Track which recipes currently cover ANY must-use item.
+        // We'll avoid replacing these when trying to cover additional uncovered terms.
+        const usesSoonFlags = chosen.map((r) => getRecipeCoversAnyCached(r));
+
+        const updated = chosen.slice();
+
+        // Track coverage counts for must-use bases across the current plan.
+        // This lets us detect coverage regressions cheaply during swaps.
+        const coveredCounts = new Map<string, number>();
+        for (const r of updated) {
+          for (const b of getRecipeCoveredBasesCached(r)) {
+            coveredCounts.set(b, (coveredCounts.get(b) ?? 0) + 1);
+          }
+        }
+
+        for (const term of missingMustUse) {
+          // Recompute covered set for updated array
+          let alreadyCovered = false;
+          for (const r of updated) {
+            if (recipeCoversBaseTerm(r, term)) {
+              alreadyCovered = true;
+              break;
+            }
+          }
+          if (alreadyCovered) continue;
+
+          // Find a candidate recipe that uses this term.
+          const candidates = strictSorted.filter((r) => recipeCoversBaseTerm(r, term));
+          if (!candidates.length) continue;
+
+          // Pick a swap target index deterministically.
+          // If we already have at least one use-soon recipe, prefer swapping within the NOT-use-soon
+          // segment so we don't lose existing use-soon coverage (e.g. avoid swapping out the only mushroom recipe
+          // when trying to also cover spinach).
+          const anyUseSoon = usesSoonFlags.some(Boolean);
+
+          let swapped = false;
+
+          // Try from the END (to preserve earlier perishables priority more strongly).
+          for (let i = updated.length - 1; i >= 0; i--) {
+            // If we already have at least one must-use (use-soon) recipe in the plan,
+            // avoid replacing it while trying to cover additional uncovered must-use terms.
+            if (anyUseSoon && usesSoonFlags[i]) continue;
+
+            const current = updated[i];
+            const curMissingW = getRecipeMissingWeightedCached(current);
+            const curMissingSet = getRecipeMissingSetCached(current);
+
+            // Compute week-missing excluding this recipe (approximate improvement from removal)
+            const weekMissingExcl = new Map<string, number>(weekMissingCounts);
+            removeMissingCounts(weekMissingExcl, curMissingSet);
+
+            for (const cand of candidates) {
+              if (cand.id === current.id) continue;
+
+              const candUseSoon = getRecipeCoversAnyCached(cand);
+
+              // Time guardrail
+              if ((cand.time_min ?? 0) - (current.time_min ?? 0) > maxExtraTimeMin) continue;
+
+              const candMissingW = getRecipeMissingWeightedCached(cand);
+              if (candMissingW - curMissingW > maxExtraMissingWeighted) continue;
+
+              const candMissingSet = getRecipeMissingSetCached(cand);
+              let newMissing = 0;
+              for (const m of candMissingSet) {
+              if ((weekMissingExcl.get(m) ?? 0) <= 0) newMissing += 1;
+              if (newMissing > maxNewMissingItems) break;
+              }
+              if (newMissing > maxNewMissingItems) continue;
+
+              // Coverage regression guardrail (fast):
+              // Only bases that are covered EXACTLY once (by the recipe we're replacing)
+              // are at risk of being lost.
+              const currentCovered = getRecipeCoveredBasesCached(current);
+              let losesCoverage = false;
+              if (currentCovered.size) {
+                const candCovered = getRecipeCoveredBasesCached(cand);
+                for (const b of currentCovered) {
+                  // If this base is only covered by `current` (count === 1),
+                  // then swapping it out would lose coverage unless `cand` also covers it.
+                  if ((coveredCounts.get(b) ?? 0) === 1 && !candCovered.has(b)) {
+                    losesCoverage = true;
+                    break;
+                  }
+                }
+              }
+              if (losesCoverage) continue;
+
+              // ✅ Accept swap
+              updated[i] = cand;
+              // Update coveredCounts for must-use bases
+              for (const b of getRecipeCoveredBasesCached(current)) {
+                const next = (coveredCounts.get(b) ?? 0) - 1;
+                if (next <= 0) coveredCounts.delete(b);
+                else coveredCounts.set(b, next);
+              }
+              for (const b of getRecipeCoveredBasesCached(cand)) {
+                coveredCounts.set(b, (coveredCounts.get(b) ?? 0) + 1);
+              }
+              // update weekMissingAll for subsequent swaps
+              removeMissingCounts(weekMissingCounts, curMissingSet);
+              addMissingCounts(weekMissingCounts, candMissingSet);  
+
+              // update usesSoonFlags so subsequent iterations respect segmentation
+              usesSoonFlags[i] = candUseSoon;
+
+              console.log('[PLAN] Forced use-soon coverage swap:', {
+                term,
+                replaced: current.title,
+                added: cand.title,
+                deltaMissingWeighted: candMissingW - curMissingW,
+                newMissing,
+                deltaTime: (cand.time_min ?? 0) - (current.time_min ?? 0),
+              });
+
+              swapped = true;
+              break;
+            }
+
+            if (swapped) break;
+          }
+
+          // Best-effort: move on if we couldn't safely cover this term
+        }
+
+        // After attempting swaps, stably move ANY must-use-covering recipes to the front.
+        // This keeps the "use soon" priority visible even if we had to introduce a new use-soon recipe
+        // while covering additional uncovered terms (e.g. spinach).
+        const zipped = updated.map((r, idx) => ({
+          r,
+          idx,
+          useSoon: getRecipeCoversAnyCached(r),
+        }));
+
+        zipped.sort((a, b) => {
+          if (a.useSoon !== b.useSoon) return a.useSoon ? -1 : 1;
+          return a.idx - b.idx; // stable within group
+        });
+
+        chosen = zipped.map((z) => z.r);
+
+        // Final visibility
+        try {
+          const coveredAfter = coveredMustUseForPlan(chosen);
+          console.log('[PLAN] Use-soon coverage summary:', {
+            mustUseCount: mustUseBase.size,
+            coveredCount: coveredAfter.size,
+            uncovered: Array.from(mustUseBase)
+              .filter((n) => !coveredAfter.has(n))
+              .slice(0, 25),
+          });
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    if (prefs.diet !== 'none') {
+      chosen = chosen.filter((r) => !violatesDiet(r, ingIndex.get(r.id) || [], prefs.diet));
+    }
 
     // ---------- 3) Persist to Supabase ----------
     const newShareId =
@@ -1283,6 +2298,7 @@ const { data: planRow, error: planErr } = await supabase
     userId,
     pantry,
     pantryPerishBy,
+    pantryUseSoon,
     ings,
     recipes,
     recomputeShopping,
@@ -1333,9 +2349,32 @@ const { data: planRow, error: planErr } = await supabase
   });
 }, [mealsN, recomputeShopping, peopleCount, planMeta?.id]);
 
+  function csvEscape(v: unknown): string {
+    const s = String(v ?? '');
+    // Escape quotes by doubling them, and wrap the field in quotes.
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+
   function downloadCSV() {
-    const header = 'name,qty,unit';
-    const lines = shopping.map((s) => `${s.name},${s.qty},${s.unit}`);
+    // Include notes for substitutions + healthy hints
+    const header = 'name,qty,unit,notes';
+
+    const lines = shopping.map((s) => {
+      const disp = formatShoppingItem(s);
+
+      const subNote = (s as unknown as { note?: string | null }).note ?? '';
+      const healthHint = getHealthSwapHintForItem(s, prefs) ?? '';
+
+      const notes = [subNote, healthHint].filter(Boolean).join(' | ');
+
+      return [
+        csvEscape(disp.nameLabel ?? s.name),
+        csvEscape(disp.qtyLabel ?? s.qty),
+        csvEscape(disp.unitLabel ?? s.unit),
+        csvEscape(notes),
+      ].join(',');
+    });
+
     const csv = [header, ...lines].join('\n');
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
@@ -1356,7 +2395,18 @@ const { data: planRow, error: planErr } = await supabase
       const disp = formatShoppingItem(s);
       const qtyPart = disp.qtyLabel ? `${disp.qtyLabel} ` : '';
       const unitPart = disp.unitLabel ? `${disp.unitLabel} ` : '';
-      return `• ${qtyPart}${unitPart}${disp.nameLabel}`.trim();
+
+      const baseLine = `• ${qtyPart}${unitPart}${disp.nameLabel}`.trim();
+
+      const subNote = (s as unknown as { note?: string | null }).note ?? '';
+      const healthHint = getHealthSwapHintForItem(s, prefs) ?? '';
+      const notes = [subNote, healthHint].filter(Boolean);
+
+      if (!notes.length) return baseLine;
+
+      // Notes lines are indented so they paste nicely into Apple Notes
+      const noteLines = notes.map((n) => `  - ${n}`);
+      return [baseLine, ...noteLines].join('\n');
     });
 
     const text = lines.join('\n');
@@ -1461,6 +2511,7 @@ const { data: planRow, error: planErr } = await supabase
 
     useEffect(() => {
   if (!planMeta?.id) return;
+  if (!DEBUG_PLAN) return;
 
   console.log('[PLAN DEBUG]', {
     plan_id: planMeta.id,
@@ -1499,6 +2550,12 @@ const { data: planRow, error: planErr } = await supabase
 
   const openRecipe = mealsN.find((m) => m.id === openId) || null;
   const openIngs = openId ? ingByRecipe.get(openId) || [] : [];
+  // Minimal visual cue for pantry items marked as "use soon"
+  function isUseSoonIngredient(name: string): boolean {
+  const n = normalizeIngredientName(name);
+  if (!n) return false;
+  return pantryUseSoon.has(n);
+  }
   const generatedLabel = planMeta
     ? new Date(planMeta.generated_at).toLocaleString()
     : null;
@@ -1522,6 +2579,8 @@ const allergyHits: string[] = (() => {
     shellfish: Array.from(expandAllergyTerms(['shellfish'])),
     soy: Array.from(expandAllergyTerms(['soy'])),
     sesame: Array.from(expandAllergyTerms(['sesame'])),
+    fish: Array.from(expandAllergyTerms(['fish'])),
+    tree_nut: Array.from(expandAllergyTerms(['tree_nut'])),
   };
 
   const hits = new Set<string>();
@@ -1792,6 +2851,14 @@ const allergyHits: string[] = (() => {
                         >
                           <td className="p-2 align-top">
                             <div>{disp.nameLabel}</div>
+
+                            {/* Pantry substitution note (shown when we kept the original in the list) */}
+                            {(s as unknown as { note?: string | null }).note ? (
+                              <div className="mt-0.5 text-xs text-gray-600 dark:text-gray-400">
+                                {(s as unknown as { note?: string | null }).note}
+                              </div>
+                            ) : null}
+
                             {healthHint && (
                               <div className="mt-0.5 text-xs text-emerald-700 dark:text-emerald-300">
                                 {healthHint}
@@ -1876,10 +2943,9 @@ const allergyHits: string[] = (() => {
 
       {/* Modal */}
       <Modal
-  open={!!openId}
-  onClose={closeRecipeModal}
-  title={openRecipe?.title ?? 'Recipe'}
->
+      open={!!openId}
+      onClose={closeRecipeModal}
+       >
                 {openRecipe ? (
           <div>
             <div className="flex items-start justify-between">
@@ -1897,8 +2963,16 @@ const allergyHits: string[] = (() => {
             <ul className="list-disc pl-5 space-y-1">
               {openIngs.map((it, idx) => (
                 <li key={idx}>
-                  {it.qty ?? ''} {it.unit ?? ''} {it.name}
-                  {it.optional ? ' (optional)' : ''}
+                  {it.qty ?? ''} {it.unit ?? ''}{' '}
+                  <span className="inline-flex items-center gap-1">
+                    <span>
+                      {it.name}
+                      {it.optional ? ' (optional)' : ''}
+                    </span>
+                    {isUseSoonIngredient(it.name) && (
+                      <span className="text-xs">⏳</span>
+                    )}
+                  </span>
                 </li>
               ))}
               {openIngs.length === 0 && (

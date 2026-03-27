@@ -57,31 +57,33 @@ export default function FavoritesPage() {
 
       // 2) fetch recipe details + ingredients (same fields used on Plan)
       const { data: rRes, error: rErr } = await supabase
-  .from('recipes')
-  .select('id,title,time_min,diet_tags,instructions')
-  .in('id', ids)
-  .eq('is_active', true);
+        .from('recipes')
+        .select('id,title,time_min,diet_tags,instructions')
+        .in('id', ids)
+        .eq('is_active', true);
 
-if (rErr) {
-  console.error(rErr);
-  setRecipes([]);
-  setIngs([]);
-  setLoading(false);
-  return;
-}
+      if (rErr) {
+        console.error(rErr);
+        setRecipes([]);
+        setIngs([]);
+        setLoading(false);
+        return;
+      }
 
-const activeIds = (rRes ?? []).map(r => r.id);
+      const activeIds = (rRes ?? []).map(r => r.id);
+      if (activeIds.length === 0) {
+        setRecipes([]);
+        setIngs([]);
+        setLoading(false);
+        return;
+      }
 
-const { data: iRes, error: iErr } = await supabase
-  .from('recipe_ingredients')
-  .select('recipe_id,name,qty,unit,optional')
-  .in('recipe_id', activeIds);
+      const { data: iRes, error: iErr } = await supabase
+        .from('recipe_ingredients')
+        .select('recipe_id,name,qty,unit,optional')
+        .in('recipe_id', activeIds);
 
-if (iErr) console.error(iErr);
-
-setRecipes(rRes || []);
-setIngs(iRes || []);
-setLoading(false);
+      if (iErr) console.error(iErr);
 
       setRecipes(rRes || []);
       setIngs(iRes || []);
@@ -140,11 +142,10 @@ setLoading(false);
       </div>
 
       {/* Modal (same look/feel as Plan) */}
-      <Modal
-  open={!!openId}
-  onClose={() => setOpenId(null)}
-  title={openRecipe?.title ?? 'Recipe'}
->
+       <Modal
+       open={!!openId}
+       onClose={() => setOpenId(null)}
+       >
         {openRecipe ? (
           <div>
             {/* Modal header with favorite */}

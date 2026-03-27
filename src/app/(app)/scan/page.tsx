@@ -1,7 +1,8 @@
 // src/app/scan/page.tsx
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import dynamic from 'next/dynamic';
 import {
   cleanOcrText,
@@ -18,7 +19,9 @@ import { draftProductFromOcrSmart } from '@/lib/normalize_smart';
 import { matchCanonical } from '@/lib/match';
 import { normalizeGtin } from '@/lib/gtin';
 import products from '@/data/products.json';
-const BarcodeScanner = dynamic(() => import('@/components/BarcodeScanner'), { ssr: false });
+const BarcodeScanner = dynamic(() => import('@/components/BarcodeScanner'), {
+  ssr: false,
+});
 import { decodeBarcodeFromFile } from '@/components/BarcodeScanner';
 
 // === Small helpers for barcode behavior ===========================
@@ -27,18 +30,48 @@ import { decodeBarcodeFromFile } from '@/components/BarcodeScanner';
 function inferFromBarcodeName(raw: string): { unit: string; qty: number } {
   const n = postClean(raw).toLowerCase();
 
-  // Pasta / noodles / typical boxed shape
-  if (/\b(pasta|spaghetti|penne|rigatoni|rigate|farfalle|farfalline|fusilli|noodles?)\b/.test(n)) {
-    // Default to a typical 16 oz bag/box
-    return { unit: 'oz', qty: 16 };
+  const isCannedStaple =
+    /\b(beans?|kidney\s*beans?|black\s*beans?|pinto\s*beans?|cannellini\s*beans?|chickpeas?|garbanzos?|corn|peas|soup|tomato(es)?|tuna|salmon)\b/.test(
+      n,
+    );
+  const isBrothLike = /\b(broth|stock)\b/.test(n);
+
+  // For pantry UX, canned staples should default to container count,
+  // not embedded serving/drained-weight numbers like 4.6 oz.
+  if (isCannedStaple) {
+    return { unit: 'can', qty: 1 };
   }
 
-  // Canned beans / veg / soups (things you usually add as "1 can")
+  if (isBrothLike) {
+    return { unit: 'carton', qty: 1 };
+  }
+
+  // If the provider embedded a size, prefer it ONLY when it looks like a real package size.
+  const oz = (n.match(/(\d+(?:\.\d+)?)\s*oz\b/) || [])[1];
+  const g = (n.match(/(\d+(?:\.\d+)?)\s*g\b/) || [])[1];
+  const ml = (n.match(/(\d+(?:\.\d+)?)\s*ml\b/) || [])[1];
+
+  const ozVal = oz ? parseFloat(oz) : NaN;
+  const gVal = g ? parseFloat(g) : NaN;
+  const mlVal = ml ? parseFloat(ml) : NaN;
+
+  if (!Number.isNaN(ozVal) && ozVal >= 8 && ozVal <= 64) {
+    return { unit: 'oz', qty: ozVal };
+  }
+  if (!Number.isNaN(gVal) && gVal >= 200 && gVal <= 2000) {
+    return { unit: 'g', qty: gVal };
+  }
+  if (!Number.isNaN(mlVal) && mlVal >= 200 && mlVal <= 2000) {
+    return { unit: 'ml', qty: mlVal };
+  }
+
+  // Pasta / noodles / typical boxed shape
   if (
-    /\b(beans?|chickpeas?|garbanzos?|corn|peas|soup|broth|tomato(es)?|tuna|salmon)\b/.test(n) &&
-    (/\b(can|canned)\b/.test(n) || /\btrader joe'?s\b/.test(n))
+    /\b(pasta|spaghetti|penne|rigatoni|rigate|farfalle|farfalline|fusilli|noodles?)\b/.test(
+      n,
+    )
   ) {
-    return { unit: 'can', qty: 1 };
+    return { unit: 'oz', qty: 16 };
   }
 
   // Rice / grains
@@ -46,30 +79,258 @@ function inferFromBarcodeName(raw: string): { unit: string; qty: number } {
     return { unit: 'oz', qty: 16 };
   }
 
-  // Fallback: let the UI behave as before
   return { unit: 'unit', qty: 1 };
 }
 
-// Normalize names so we can merge duplicates like
-// "Organic Kidney Beans" & "Trader Joe's Kidney Beans"
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function normKeyName(s: string): string {
-  return postClean(s)
-    .toLowerCase()
-    .replace(/\b(trader joe'?s|kirkland|organic)\b/g, '') // strip brand / organic
-    .replace(/\s+/g, ' ')
-    .trim();
+// === Soft-mode unit selector (aligned with Pantry) ==================
+
+const UNIT_OPTIONS = [
+  'unit',
+  'can',
+  'bottle',
+  'carton',
+  'block',
+  'bunch',
+  'clove',
+  'head',
+  'oz',
+  'lb',
+  'g',
+  'ml',
+  'cup',
+  'tbsp',
+  'tsp',
+] as const;
+
+type UnitOption = (typeof UNIT_OPTIONS)[number];
+
+
+function recommendedUnitsForName(nameRaw: string): UnitOption[] {
+  const n = (nameRaw || '').toLowerCase();
+
+  if (/(beef|turkey|chicken|pork|lamb|shrimp|fish|salmon|tuna|cod)/.test(n)) {
+    return ['lb', 'oz', 'unit'];
+  }
+
+  if (
+    /(pasta|spaghetti|penne|rigatoni|fusilli|noodles?|rice|quinoa|bulgur|couscous)/.test(
+      n,
+    )
+  ) {
+    return ['oz', 'lb', 'unit'];
+  }
+
+  if (/(beans?|chickpeas?|lentils?|peas|corn|tomato)/.test(n)) {
+    return ['can', 'oz', 'lb', 'unit'];
+  }
+
+  if (/(milk|yogurt|cheese|butter|cream)/.test(n)) {
+    return ['oz', 'lb', 'unit', 'carton', 'block'];
+  }
+
+  return ['unit', 'oz', 'lb'];
 }
 
-type Canonical = { id: string; brand: string; name: string; category?: string; score?: number };
-type ProductSeed = { id: string; brand: string; name: string; category?: string };
+function UnitSelectSoftMode(props: {
+  value: string;
+  nameForSuggestion: string;
+  onChange: (v: string) => void;
+}) {
+  const { value, nameForSuggestion, onChange } = props;
+
+  const [open, setOpen] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null);
+
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  const recommended = recommendedUnitsForName(nameForSuggestion);
+  const canToggle = recommended.length < UNIT_OPTIONS.length;
+
+  const MODE_SENTINEL = '__MORE__';
+  const LESS_SENTINEL = '__LESS__';
+
+  const baseOptions: readonly string[] = showAll
+    ? (UNIT_OPTIONS as readonly string[])
+    : (recommended as readonly string[]);
+
+  const withValue: string[] =
+    value && baseOptions.includes(value)
+      ? Array.from(baseOptions)
+      : Array.from(new Set([value, ...baseOptions]));
+
+  const listOptions: string[] = canToggle
+    ? [...withValue, showAll ? LESS_SENTINEL : MODE_SENTINEL]
+    : withValue;
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onDown = (ev: PointerEvent) => {
+      const target = ev.target as Node | null;
+      if (!target) return;
+      if (rootRef.current && !rootRef.current.contains(target)) {
+        if (menuRef.current && menuRef.current.contains(target)) return;
+        setOpen(false);
+      }
+    };
+
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') setOpen(false);
+    };
+
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    const updateMenuPosition = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+
+      const rect = trigger.getBoundingClientRect();
+      const maxMenuHeight = 256;
+      const gap = 4;
+
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const spaceAbove = rect.top;
+
+      const direction =
+        spaceBelow < maxMenuHeight && spaceAbove > spaceBelow ? 'up' : 'down';
+
+      setMenuStyle({
+        position: 'fixed',
+        left: rect.left,
+        width: Math.max(rect.width, 144),
+        top: direction === 'up' ? rect.top - gap - maxMenuHeight : rect.bottom + gap,
+        maxHeight: maxMenuHeight,
+        zIndex: 1000,
+        overflowAnchor: 'none',
+      });
+    };
+
+    updateMenuPosition();
+
+    window.addEventListener('resize', updateMenuPosition);
+    window.addEventListener('scroll', updateMenuPosition, true);
+
+    return () => {
+      window.removeEventListener('resize', updateMenuPosition);
+      window.removeEventListener('scroll', updateMenuPosition, true);
+    };
+  }, [open, showAll]);
+
+  const displayValue = value || 'unit';
+
+  const toggleMode = useCallback(() => {
+    setShowAll((prev) => !prev);
+  }, []);
+
+  const handlePick = (v: string) => {
+    if (v === MODE_SENTINEL || v === LESS_SENTINEL) {
+      toggleMode();
+      return;
+    }
+
+    onChange(v);
+    setOpen(false);
+  };
+
+  const menu = open && menuStyle ? (
+    <div
+      ref={menuRef}
+      className="rounded-lg border bg-white shadow-lg overflow-hidden"
+      role="listbox"
+      style={menuStyle}
+    >
+      <ul
+        className="max-h-64 overflow-auto py-1 overscroll-contain"
+        style={{ overflowAnchor: 'none' }}
+      >
+        {listOptions.map((u) => {
+          const isToggle = u === MODE_SENTINEL || u === LESS_SENTINEL;
+          const label =
+            u === MODE_SENTINEL ? 'More…' : u === LESS_SENTINEL ? 'Less…' : u;
+
+          return (
+            <li key={u} role="presentation">
+              <div
+                role="option"
+                aria-selected={u === value}
+                className={
+                  'cursor-pointer select-none px-3 py-2 text-sm hover:bg-black/5 ' +
+                  (isToggle ? 'font-medium text-neutral-700' : '')
+                }
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handlePick(u);
+                }}
+              >
+                {label}
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  ) : null;
+
+  return (
+    <div ref={rootRef} className="inline-flex items-center">
+      <button
+        ref={triggerRef}
+        type="button"
+        className="border rounded px-2 py-1 text-sm inline-flex items-center gap-2"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="capitalize">{displayValue}</span>
+        <span aria-hidden>▾</span>
+      </button>
+
+      {typeof document !== 'undefined' && menu
+        ? createPortal(menu, document.body)
+        : null}
+    </div>
+  );
+}
+
+type Canonical = {
+  id: string;
+  brand: string;
+  name: string;
+  category?: string;
+  score?: number;
+};
+type ProductSeed = {
+  id: string;
+  brand: string;
+  name: string;
+  category?: string;
+};
 type Draft = {
   brand: string;
   name: string;
   size: string;
   candidates: string[];
-  unit?: string;       // for pantry merging + sensible defaults
-  quantity?: number;   // default quantity (e.g., 1 can, 16 oz box)
+  unit?: string;
+  quantity?: number;
 };
 type ResultT = {
   source: 'upc' | 'ocr';
@@ -81,7 +342,6 @@ type ResultT = {
   previewUrl?: string | null;
 };
 
-// Treat the JSON catalog with a light type to avoid any
 const catalog = products as unknown as ProductSeed[];
 
 const BRAND_ALLOW_RE =
@@ -94,20 +354,31 @@ const useClassifier = () =>
     const txt = (t || '').toLowerCase();
     const out = new Set<string>(['Food']);
 
-    // Pantry families
-    if (/\bbeans?\b|kidney|black|garbanzo|chickpeas?|pinto|cannellini|lentils?\b/.test(txt)) out.add('Beans');
-    if (/\bpasta|spaghetti|penne|farfalle|farfalline|fusilli|rigatoni|rotini|macaroni|radiatori|orecchiette|linguine|fettuccine|noodles?\b/.test(txt)) out.add('Pasta');
+    if (
+      /\bbeans?\b|kidney|black|garbanzo|chickpeas?|pinto|cannellini|lentils?\b/.test(
+        txt,
+      )
+    )
+      out.add('Beans');
+    if (
+      /\bpasta|spaghetti|penne|farfalle|farfalline|fusilli|rigatoni|rotini|macaroni|radiatori|orecchiette|linguine|fettuccine|noodles?\b/.test(
+        txt,
+      )
+    )
+      out.add('Pasta');
     if (/\brice\b|basmati|jasmine|arborio|sushi\b/.test(txt)) out.add('Rice');
-    if (/\btomato(?:es)?\b|paste|sauce|crushed|diced\b/.test(txt)) out.add('Tomatoes');
+    if (/\btomato(?:es)?\b|paste|sauce|crushed|diced\b/.test(txt))
+      out.add('Tomatoes');
     if (/\bbroth\b|\bstock\b/.test(txt)) out.add('Broth');
     if (/\bflour\b/.test(txt)) out.add('Flour');
     if (/\bsugar\b/.test(txt)) out.add('Sugar');
-    if (/\bmilk\b|almond\s+milk|oat\s+milk|soy\s+milk\b/.test(txt)) out.add('Milk');
+    if (/\bmilk\b|almond\s+milk|oat\s+milk|soy\s+milk\b/.test(txt))
+      out.add('Milk');
     if (/\boil\b|olive\b|extra\s*virgin\b/.test(txt)) out.add('Oil');
     if (/\bvinegar\b/.test(txt)) out.add('Vinegar');
-    if (/\btuna\b|\bsalmon\b|\bsardines?\b|\banchov(?:y|ies)\b|\bmackerel\b/.test(txt)) out.add('Fish');
+    if (/\btuna\b|\bsalmon\b|\bsardines?\b|\banchov(?:y|ies)\b|\bmackerel\b/.test(txt))
+      out.add('Fish');
 
-    // Descriptors
     if (/\borganic\b/.test(txt)) out.add('Organic');
     if (/\bgluten[- ]?free\b/.test(txt)) out.add('Gluten-free');
     if (/\bbrown\s+rice\b/.test(txt)) out.add('Brown rice');
@@ -116,13 +387,12 @@ const useClassifier = () =>
     return Array.from(out);
   }, []);
 
-// Suppress likely serving-size values for shelf-stable foods (keep liquids)
 function sanitizeUPCSize(name: string, size: string | undefined, labels: string[]): string {
   if (!size) return '';
   const s = size.toLowerCase();
 
   const ozFl = (s.match(/(\d+(?:\.\d+)?)\s*fl\s*oz/) || [])[1];
-  const oz = (s.match(/(\d+(?:\.\d+)?)\s*oz\b/) || [])[1]; // plain oz
+  const oz = (s.match(/(\d+(?:\.\d+)?)\s*oz\b/) || [])[1];
   const g = (s.match(/(\d+(?:\.\d+)?)\s*g\b/) || [])[1];
   const ml = (s.match(/(\d+(?:\.\d+)?)\s*ml\b/) || [])[1];
 
@@ -131,16 +401,18 @@ function sanitizeUPCSize(name: string, size: string | undefined, labels: string[
   const mlVal = ml ? parseFloat(ml) : NaN;
 
   const labelStr = `${name} ${labels.join(' ')}`.toLowerCase();
-  const isLiquid = !!ozFl || /\bml\b|\bl(?!b)\b/i.test(s) || /(broth|soup|sauce|oil|vinegar|milk)/i.test(labelStr);
+  const isLiquid =
+    !!ozFl ||
+    /\bml\b|\bl(?!b)\b/i.test(s) ||
+    /(broth|soup|sauce|oil|vinegar|milk)/i.test(labelStr);
 
-  // For non-liquids (pasta/beans/rice/tomatoes/etc), ignore tiny sizes that are likely "per serving"
   const looksPantry = /(beans|pasta|rice|tomato|flour|sugar)/i.test(labelStr);
 
   const verySmallOz = !isNaN(ozVal) && ozVal > 0 && ozVal <= 4;
   const verySmallG = !isNaN(gVal) && gVal > 0 && gVal <= 120;
 
   if (!isLiquid && looksPantry && (verySmallOz || verySmallG)) {
-    return ''; // drop misleading serving sizes
+    return '';
   }
 
   if (!isNaN(ozVal) && ozVal >= 8) {
@@ -187,8 +459,9 @@ export default function ScanPage() {
 
   const [mounted, setMounted] = useState(false);
   const [canUseCamera, setCanUseCamera] = useState(false);
-  const [camState, setCamState] =
-    useState<'idle' | 'requesting' | 'running' | 'denied' | 'notfound'>('idle');
+  const [camState, setCamState] = useState<
+    'idle' | 'requesting' | 'running' | 'denied' | 'notfound'
+  >('idle');
 
   const [result, setResult] = useState<ResultT | null>(null);
 
@@ -204,15 +477,16 @@ export default function ScanPage() {
       typeof window !== 'undefined' &&
       (window.isSecureContext || location.hostname === 'localhost');
 
-    setCanUseCamera(secure && typeof navigator !== 'undefined' && 'mediaDevices' in navigator);
+    setCanUseCamera(
+      secure && typeof navigator !== 'undefined' && 'mediaDevices' in navigator,
+    );
     if (!secure) {
       setHint('Camera requires HTTPS (or localhost). Upload a barcode/label photo instead.');
     }
   }, []);
 
-  // ---------- image preprocess + OCR ----------
   async function preprocessFrontImage(
-    file: File
+    file: File,
   ): Promise<{ full: Blob; brCrop: Blob; topBrandCrop: Blob }> {
     const img = await new Promise<HTMLImageElement>((res, rej) => {
       const u = URL.createObjectURL(file);
@@ -227,7 +501,6 @@ export default function ScanPage() {
     const w = Math.round(img.naturalWidth * scale);
     const h = Math.round(img.naturalHeight * scale);
 
-    // full canvas
     const c = document.createElement('canvas');
     c.width = w;
     c.height = h;
@@ -235,7 +508,6 @@ export default function ScanPage() {
     ctx.filter = 'contrast(115%) brightness(105%)';
     ctx.drawImage(img, 0, 0, w, h);
 
-    // bottom-right crop (size)
     const cw = Math.round(w * 0.55);
     const ch = Math.round(h * 0.45);
     const cx = Math.max(0, w - cw);
@@ -247,7 +519,6 @@ export default function ScanPage() {
     sctx.filter = 'contrast(125%) brightness(110%)';
     sctx.drawImage(c, cx, cy, cw, ch, 0, 0, cw, ch);
 
-    // top-center crop (brand zone)
     const bw = Math.round(w * 0.7);
     const bh = Math.round(h * 0.3);
     const bx = Math.max(0, Math.round((w - bw) / 2));
@@ -260,13 +531,13 @@ export default function ScanPage() {
     bctx.drawImage(c, bx, by, bw, bh, 0, 0, bw, bh);
 
     const full = await new Promise<Blob>((res) =>
-      c.toBlob((b) => res(b as Blob), 'image/jpeg', 0.9)
+      c.toBlob((b) => res(b as Blob), 'image/jpeg', 0.9),
     );
     const brCrop = await new Promise<Blob>((res) =>
-      cropSize.toBlob((b) => res(b as Blob), 'image/jpeg', 0.95)
+      cropSize.toBlob((b) => res(b as Blob), 'image/jpeg', 0.95),
     );
     const topBrandCrop = await new Promise<Blob>((res) =>
-      cropBrand.toBlob((b) => res(b as Blob), 'image/jpeg', 0.95)
+      cropBrand.toBlob((b) => res(b as Blob), 'image/jpeg', 0.95),
     );
 
     return { full, brCrop, topBrandCrop };
@@ -305,7 +576,6 @@ export default function ScanPage() {
     return null;
   }, []);
 
-  // ---------- flows ----------
   async function handleFrontFile(file: File) {
     setBusy(true);
     setError('');
@@ -314,11 +584,9 @@ export default function ScanPage() {
       const previewUrl = URL.createObjectURL(file);
       const { full, brCrop, topBrandCrop } = await preprocessFrontImage(file);
 
-      // full image OCR
       const raw = await runOcrServer(full);
       const cleaned = cleanOcrText(raw);
 
-      // size crop OCR
       let sizeFromCrop = '';
       try {
         const rawCrop = await runOcrServer(brCrop);
@@ -327,7 +595,6 @@ export default function ScanPage() {
         // best-effort
       }
 
-      // brand crop OCR
       let brandFromCrop = '';
       try {
         const rawBrand = await runOcrServer(topBrandCrop);
@@ -336,18 +603,18 @@ export default function ScanPage() {
         // best-effort
       }
 
-      // structured draft
       const draftSmart = draftProductFromOcrSmart(cleaned);
       const draftBase: Draft = {
         brand: draftSmart.brand || '',
         name: draftSmart.name || '',
         size: draftSmart.size || '',
-        candidates: [draftSmart.brand, draftSmart.name, ...(draftSmart.candidates ?? [])].filter(
-          Boolean
-        ) as string[],
+        candidates: [
+          draftSmart.brand,
+          draftSmart.name,
+          ...(draftSmart.candidates ?? []),
+        ].filter(Boolean) as string[],
       };
 
-      // Backfills
       if (!draftBase.size && sizeFromCrop) draftBase.size = sizeFromCrop;
       if (!draftBase.size) {
         const sizeRetry = extractSize(cleaned);
@@ -355,25 +622,24 @@ export default function ScanPage() {
       }
       if (!draftBase.brand && brandFromCrop) draftBase.brand = brandFromCrop;
 
-      // Clean/proper-case the name (drop duplicated brand if any)
       draftBase.name = properCaseName(
-        stripBrandFromName(draftBase.name, draftBase.brand || brandFromCrop || draftSmart.brand)
+        stripBrandFromName(
+          draftBase.name,
+          draftBase.brand || brandFromCrop || draftSmart.brand,
+        ),
       );
 
-      // Base labels from OCR
-      let labels = Array.from(new Set([...classifyFromText(cleaned), ...(draftSmart.labels ?? [])]));
-      // Prefer subtype (e.g., Kidney Beans) over family (Beans)
+      let labels = Array.from(
+        new Set([...classifyFromText(cleaned), ...(draftSmart.labels ?? [])]),
+      );
       labels = labelsWithPreferredSubtype(labels, cleaned);
 
       const allergens = scanAllergens(cleaned);
 
-      const matches = matchCanonical(
-        { ...draftBase, labels },
-        catalog,
-        { topK: 5 }
-      ) as Canonical[];
+      const matches = matchCanonical({ ...draftBase, labels }, catalog, {
+        topK: 5,
+      }) as Canonical[];
 
-      // Brand backfill from catalog (permissive)
       let brandFinal = draftBase.brand;
       if (!brandFinal && matches.length) {
         const top = matches[0];
@@ -381,7 +647,15 @@ export default function ScanPage() {
       }
       const draft: Draft = { ...draftBase, brand: brandFinal };
 
-      setResult({ source: 'ocr', text: cleaned, draft, labels, allergens, matches, previewUrl });
+      setResult({
+        source: 'ocr',
+        text: cleaned,
+        draft,
+        labels,
+        allergens,
+        matches,
+        previewUrl,
+      });
       setHint('Done! If something looks off, try a sharper front photo.');
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Front-label read failed.';
@@ -393,92 +667,81 @@ export default function ScanPage() {
   }
 
   async function handleBarcode(upc: string) {
-  setBusy(true);
-  setError('');
-  setHint(`Barcode ${upc} found. Looking up product…`);
+    setBusy(true);
+    setError('');
+    setHint(`Barcode ${upc} found. Looking up product…`);
 
-  try {
-    const prod = await lookupUPC(upc);
+    try {
+      const prod = await lookupUPC(upc);
 
-    if (prod) {
-      // 1) Clean brand + name from provider
-      const rawBrand = (prod.brand || '').trim();
-      const rawName  = (prod.name  || '').trim();
+      if (prod) {
+        const rawBrand = (prod.brand || '').trim();
+        const rawName = (prod.name || '').trim();
 
-      // Strip brand from name (so "Trader Joe's Organic Kidney Beans" -> "Organic Kidney Beans")
-      const nameNoBrand = properCaseName(
-        stripBrandFromName(rawName, rawBrand) || rawName
-      );
+        const nameNoBrand = properCaseName(
+          stripBrandFromName(rawName, rawBrand) || rawName,
+        );
 
-      // 2) Build labels from a brandless-focused string
-      const classifierInput = `${nameNoBrand} ${rawBrand}`.trim();
+        const classifierInput = `${nameNoBrand} ${rawBrand}`.trim();
 
-      let labels = classifyFromText(classifierInput);
-      labels = labelsWithPreferredSubtype(labels, classifierInput);
+        let labels = classifyFromText(classifierInput);
+        labels = labelsWithPreferredSubtype(labels, classifierInput);
 
-      // 3) Sanitize the UPC size (hide serving sizes / weird formats for pantry use)
-      const sizeClean = sanitizeUPCSize(nameNoBrand, prod.size, labels);
+        const sizeClean = sanitizeUPCSize(nameNoBrand, prod.size, labels);
 
-      // 4) Infer sensible unit + qty for BARCODE flows
-      const { unit, qty } = inferFromBarcodeName(classifierInput);
+        // Use the sanitized size when inferring pantry defaults so tiny provider sizes
+        // like 4.6 oz do not leak into the default qty.
+        const inferInput = `${nameNoBrand} ${sizeClean}`.trim();
+        const { unit, qty } = inferFromBarcodeName(inferInput);
 
-      const draftBase: Draft = {
-        brand: rawBrand,
-        name:  nameNoBrand,
-        size:  sizeClean,
-        candidates: [rawBrand, nameNoBrand].filter(Boolean),
-        unit,
-        quantity: qty,
-      };
+        const draftBase: Draft = {
+          brand: rawBrand,
+          name: nameNoBrand,
+          size: sizeClean,
+          candidates: [rawBrand, nameNoBrand].filter(Boolean),
+          unit,
+          quantity: qty,
+        };
 
-      // For the “OCR Text” box / debug area, show our normalized summary
-      const text = [rawBrand, nameNoBrand, sizeClean]
-        .filter(Boolean)
-        .join(' ')
-        .trim();
+        const text = [rawBrand, nameNoBrand, sizeClean].filter(Boolean).join(' ').trim();
 
-      const allergens: string[] = [];
+        const allergens: string[] = [];
 
-      const matches = matchCanonical(
-        { ...draftBase, labels },
-        catalog,
-        { topK: 5 }
-      ) as Canonical[];
+        const matches = matchCanonical({ ...draftBase, labels }, catalog, {
+          topK: 5,
+        }) as Canonical[];
 
-      // 5) Brand backfill from catalog (permissive)
-      let brandFinal = draftBase.brand;
-      if (!brandFinal && matches.length) {
-        const top = matches[0];
-        if ((top.score ?? 0) >= 0.12 && top.brand) {
-          brandFinal = top.brand;
+        let brandFinal = draftBase.brand;
+        if (!brandFinal && matches.length) {
+          const top = matches[0];
+          if ((top.score ?? 0) >= 0.12 && top.brand) {
+            brandFinal = top.brand;
+          }
         }
+
+        const draft: Draft = { ...draftBase, brand: brandFinal };
+
+        setResult({
+          source: 'upc',
+          text,
+          draft,
+          labels,
+          allergens,
+          matches,
+          previewUrl: null,
+        });
+
+        setHint('Found by barcode. (Add a front photo if you want nutrition & allergens.)');
+      } else {
+        setHint('Barcode not in database. Capture the FRONT label instead.');
       }
-
-      const draft: Draft = { ...draftBase, brand: brandFinal };
-
-      setResult({
-        source: 'upc',
-        text,
-        draft,
-        labels,
-        allergens,
-        matches,
-        previewUrl: null,
-      });
-
-      setHint(
-        'Found by barcode. (Add a front photo if you want nutrition & allergens.)'
-      );
-    } else {
-      setHint('Barcode not in database. Capture the FRONT label instead.');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Barcode lookup failed.';
+      setError(msg);
+    } finally {
+      setBusy(false);
     }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : 'Barcode lookup failed.';
-    setError(msg);
-  } finally {
-    setBusy(false);
   }
-}
 
   async function handleBarcodeFile(file: File) {
     setBusy(true);
@@ -506,8 +769,11 @@ export default function ScanPage() {
       if (e && typeof e === 'object' && 'name' in e) {
         const n = String((e as { name?: string }).name || '');
         if (n === 'NotAllowedError') setCamState('denied');
-        else if (n === 'NotFoundError' || n === 'OverconstrainedError') setCamState('notfound');
-        else setError(e instanceof Error ? e.message : 'Camera error');
+        else if (n === 'NotFoundError' || n === 'OverconstrainedError') {
+          setCamState('notfound');
+        } else {
+          setError(e instanceof Error ? e.message : 'Camera error');
+        }
       } else {
         setError('Camera error');
       }
@@ -535,6 +801,46 @@ export default function ScanPage() {
             </div>
             <div>
               <span className="font-medium">Size:</span> {draft.size || '—'}
+            </div>
+            <div className="mt-2">
+              <span className="font-medium">Pantry Default:</span>
+              <div className="flex items-center gap-3 mt-1">
+                <input
+                  type="number"
+                  className="border rounded px-2 py-1 w-20 text-sm"
+                  value={draft.quantity ?? 1}
+                  onChange={(e) =>
+                    setResult((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            draft: {
+                              ...prev.draft,
+                              quantity: Number(e.target.value) || 1,
+                            },
+                          }
+                        : prev,
+                    )
+                  }
+                />
+                <UnitSelectSoftMode
+                  value={draft.unit || 'unit'}
+                  nameForSuggestion={draft.name}
+                  onChange={(v) =>
+                    setResult((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            draft: {
+                              ...prev.draft,
+                              unit: v,
+                            },
+                          }
+                        : prev,
+                    )
+                  }
+                />
+              </div>
             </div>
           </div>
 
@@ -605,21 +911,19 @@ export default function ScanPage() {
       <p className="mt-2 text-sm text-neutral-700">{hint}</p>
 
       <div className="mt-4 grid md:grid-cols-2 gap-6">
-        {/* Barcode */}
         <div>
           <h3 className="font-medium mb-2">Scan Barcode</h3>
 
           {!mounted ? (
-            <div /> // (or a tiny skeleton if you want)
+            <div />
           ) : canUseCamera ? (
             camState === 'running' ? (
               <BarcodeScanner
-               onDetected={handleBarcode}
-               onError={setError}
-               maxWidth={360}    // tighter video width
-               boxFrac={0.56}    // smaller inner aim box
-               //showTorch        
-               />
+                onDetected={handleBarcode}
+                onError={setError}
+                maxWidth={360}
+                boxFrac={0.56}
+              />
             ) : (
               <div className="space-y-2">
                 <button onClick={startScanner} className="px-3 py-2 rounded-xl border text-sm">
@@ -636,7 +940,9 @@ export default function ScanPage() {
               </div>
             )
           ) : (
-            <div className="text-sm text-neutral-500 mb-2">Camera not available in this browser.</div>
+            <div className="text-sm text-neutral-500 mb-2">
+              Camera not available in this browser.
+            </div>
           )}
 
           <div className="mt-2 flex gap-2">
@@ -656,7 +962,6 @@ export default function ScanPage() {
           </div>
         </div>
 
-        {/* Front photo */}
         <div>
           <h3 className="font-medium mb-2">Front Label</h3>
           <div className="flex gap-2">
@@ -668,7 +973,9 @@ export default function ScanPage() {
               Upload Photo
             </button>
             <button
-              onClick={() => setResult(null)}
+              onClick={() => {
+                setResult(null);
+              }}
               className="px-3 py-2 rounded-xl border text-sm"
               disabled={busy}
             >

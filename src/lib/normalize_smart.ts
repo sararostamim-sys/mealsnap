@@ -41,21 +41,45 @@ export function draftProductFromOcrSmart(rawOcr: string): Draft {
 function deriveLabels(text: string, descriptors: string[], category?: string | ''): string[] {
   const L = new Set<string>();
   L.add('Food');
+
+  const t = (text || '').toLowerCase();
+
+  // Keep upstream category if present
   if (category) L.add(category);
-  if (/\bbeans?\b/i.test(text)) L.add('Beans');
-  if (/\bpasta\b/i.test(text)) L.add('Pasta');
-  if (/\brice\b/i.test(text)) L.add('Rice');
-  if (/\btomato(?:es)?\b/i.test(text)) L.add('Tomatoes');
-  if (/\bbroth|stock\b/i.test(text)) L.add('Broth');
-  if (/\bflour\b/i.test(text)) L.add('Flour');
-  if (/\bsugar\b/i.test(text)) L.add('Sugar');
-  if (/\bmilk|almond|oat|soy|coconut\b/i.test(text)) L.add('Milk');
-  if (/\boil\b/i.test(text)) L.add('Oil');
-  if (/\bvinegar\b/i.test(text)) L.add('Vinegar');
-  if (/\btuna|salmon|sardines?|anchov(?:y|ies)|mackerel\b/i.test(text)) L.add('Fish');
-  if (descriptors.find(d => d.toLowerCase() === 'organic')) L.add('Organic');
-  if (/gluten\s*free/i.test(text)) L.add('Gluten Free');
-  if (/no\s+salt\s+added|low\s+sodium/i.test(text)) L.add('Low Sodium');
+
+  // --- Pantry families (prefer subtype over generic where possible) ---
+
+  // Beans: add a specific bean type when detected; avoid also adding generic "Beans"
+  let beanSubtype: string | null = null;
+  if (/\bkidney\b/.test(t)) beanSubtype = 'Kidney beans';
+  else if (/\bblack\b/.test(t)) beanSubtype = 'Black beans';
+  else if (/\bgarbanzo\b|\bchickpea\b/.test(t)) beanSubtype = 'Chickpeas';
+  else if (/\bpinto\b/.test(t)) beanSubtype = 'Pinto beans';
+  else if (/\bcannellini\b/.test(t)) beanSubtype = 'Cannellini beans';
+  else if (/\blentil\b/.test(t)) beanSubtype = 'Lentils';
+
+  if (beanSubtype) {
+    L.add(beanSubtype);
+  } else if (/\bbeans?\b/.test(t)) {
+    L.add('Beans');
+  }
+
+  if (/\bpasta\b/.test(t)) L.add('Pasta');
+  if (/\brice\b/.test(t)) L.add('Rice');
+  if (/\btomato(?:es)?\b/.test(t)) L.add('Tomatoes');
+  if (/\bbroth\b|\bstock\b/.test(t)) L.add('Broth');
+  if (/\bflour\b/.test(t)) L.add('Flour');
+  if (/\bsugar\b/.test(t)) L.add('Sugar');
+  if (/\bmilk\b|\balmond\b|\boat\b|\bsoy\b|\bcoconut\b/.test(t)) L.add('Milk');
+  if (/\boil\b/.test(t)) L.add('Oil');
+  if (/\bvinegar\b/.test(t)) L.add('Vinegar');
+  if (/\btuna\b|\bsalmon\b|\bsardines?\b|\banchov(?:y|ies)\b|\bmackerel\b/.test(t)) L.add('Fish');
+
+  // --- Descriptors ---
+  if ((descriptors || []).some((d) => d.toLowerCase() === 'organic')) L.add('Organic');
+  if (/\bgluten\s*free\b/i.test(text)) L.add('Gluten-free');
+  if (/\bno\s+salt\s+added\b|\blow\s+sodium\b/i.test(text)) L.add('Low sodium');
+
   return Array.from(L);
 }
 

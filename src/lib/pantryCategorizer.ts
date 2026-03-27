@@ -17,6 +17,18 @@ export type PantryCategory =
 
 export function autoCategoryFromName(name: string): PantryCategory {
   const n = name.toLowerCase().trim();
+
+    // --- IMPORTANT: protein override FIRST ---
+  // Prevent "ground beef / turkey" from being misclassified as spices
+  if (/\bground\s+(beef|turkey|chicken|pork|lamb|veal)\b/i.test(n)) {
+    return 'protein';
+  }
+
+  // (optional but recommended)
+  if (/\b(beef|turkey|chicken|pork|lamb|veal|sausage|bacon)\b/i.test(n)) {
+    return 'protein';
+  }
+
   if (!n) return 'other';
 
   const n2 = n
@@ -48,7 +60,7 @@ export function autoCategoryFromName(name: string): PantryCategory {
 
   // Condiments, oils, sauces, dressings, pastes (tahini belongs here)
   if (
-    /\b(ketchup|mustard|mayo|mayonnaise|soy sauce|tamari|teriyaki sauce|teriyaki|salsa|hot sauce|bbq sauce|barbecue sauce|vinegar|balsamic|olive oil|canola oil|vegetable oil|sesame oil|dressing|pesto|tahini|harissa|harissa paste|miso|gochujang|curry paste)\b/.test(
+    /\b(ketchup|mustard|mayo|mayonnaise|soy sauce|tamari|teriyaki sauce|teriyaki|salsa|hot sauce|bbq sauce|barbecue sauce|vinegar|balsamic|olive oil|canola oil|vegetable oil|sesame oil|dressing|pesto|tahini|harissa|harissa paste|miso|gochujang|curry paste|marinara|sriracha)\b/.test(
       n2,
     )
   ) {
@@ -63,14 +75,14 @@ export function autoCategoryFromName(name: string): PantryCategory {
   // Fresh fruit & veg
   if (
   /\b(apple|banana|orange|pear|grape|berry|strawberry|blueberry|raspberry)\b/.test(n2) ||
-  /\b(tomato|onion|garlic|bell pepper|cucumber|zucchini|squash|broccoli|cauliflower|carrot|spinach|lettuce|kale|greens|avocado|potato|sweet potato|lime|lemon|cilantro|parsley|basil|mint|dill|mushrooms?|green beans?|string beans?|corn|ginger)\b/.test(n2)
+  /\b(tomato|onion|garlic|bell pepper|sweet pepper|cucumber|zucchini|squash|broccoli|cauliflower|carrot|spinach|lettuce|kale|greens|avocado|potato|sweet potato|lime|lemon|cilantro|parsley|basil|mint|dill|mushrooms?|green beans?|string beans?|corn|ginger|bok\s*choy|pak\s*choi|snap pea(s)?|snow pea(s)?|scallion(s)?|green onion(s)?|cabbage|red cabbage|napa cabbage|celery|jalapeñ?o|serrano|asparagus|brussels sprouts?|eggplant|leek(s)?)\b/.test(n2)
 ) {
   return 'produce';
 }
 
   // Proteins (meat, fish, tofu, eggs)
 if (
-  /\b(chicken|beef|pork|ham|bacon|sausage|turkey|salmon|cod|fish|shrimp|tuna|tofu|tempeh|seitan|egg|eggs)\b/.test(
+  /\b(chicken|beef|pork|ham|bacon|sausage|lamb|veal|pork|turkey|salmon|cod|fish|shrimp|tuna|tofu|tempeh|seitan|egg|eggs)\b/.test(
     n2,
   )
 ) {
@@ -78,7 +90,11 @@ if (
 }
 
   // Legumes (beans/lentils)
-  if (/\b(lentil|lentils|chickpea|chickpeas|garbanzo|black bean|kidney bean|pinto bean|beans)\b/.test(n2)) {
+  if (
+  /\b(lentil(s)?|chickpea(s)?|garbanzo|split pea(s)?|black bean(s)?|kidney bean(s)?|pinto bean(s)?|white bean(s)?|cannellini bean(s)?|navy bean(s)?|bean(s)?)\b/.test(
+    n2,
+  )
+) {
   return 'legumes';
 }
 

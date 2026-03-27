@@ -298,7 +298,7 @@ export function extractBeanType(text: string): string {
   const twoExact = BEAN_TYPES_2W.find(tt =>
     new RegExp(`\\b${tt.replace(' ', '\\s+')}\\b`, 'i').test(t)
   );
-  if (twoExact) return capitalizeWords(twoExact);
+  if (twoExact) return capitalizeWords(twoExact) + ' Beans';
 
   const oneExact = BEAN_TYPES_1W.find(tt =>
     new RegExp(`\\b${tt}\\b`, 'i').test(t)
@@ -335,7 +335,9 @@ export function extractBeanType(text: string): string {
       const d = levenshtein(phrase, c);
       if (d < best.dist) best = { hit: c, dist: d };
     }
-    return best.hit && best.dist <= maxDist ? capitalizeWords(best.hit) : '';
+    return best.hit && best.dist <= maxDist
+      ? capitalizeWords(best.hit) + ' Beans'
+      : '';
   };
 
   for (let i = 0; i < toks.length; i++) {
