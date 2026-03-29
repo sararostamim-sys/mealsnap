@@ -13,7 +13,7 @@ type SupportType =
   | 'general_feedback';
 
 export default function SupportPage() {
-  useRequireAuth();
+  const { checking } = useRequireAuth();
 
   const pathname = usePathname();
 
@@ -27,6 +27,8 @@ export default function SupportPage() {
   const inputCls =
     'rounded border px-3 py-2 border-gray-300 dark:border-gray-700 bg-white dark:bg-neutral-900 text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500';
   const selectCls = inputCls + ' pr-8';
+
+  if (checking) return <div className="p-6 text-sm text-gray-500">Loading...</div>;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
