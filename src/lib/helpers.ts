@@ -102,6 +102,35 @@ function brandlessName(input: string): string {
     ''
   ).trim();
 
+  // 3b) Remove product-attribute noise that is usually not helpful for pantry names.
+  // Keep this focused on retail/package descriptors, not core ingredient identity.
+  s = s
+    // Protein / fat descriptors
+    .replace(/\b\d{1,3}\s*%\s*lean\b/gi, '')
+    .replace(/\b\d{1,3}\s*%\s*fat\b/gi, '')
+    .replace(/\b\d{1,2}\s*lean\s*\d{1,2}\s*fat\b/gi, '')
+    .replace(/\b\d{1,2}\s*\/\s*\d{1,2}\b/g, '')
+    .replace(/\bextra\s+lean\b/gi, '')
+    .replace(/\blean\b/gi, '')
+    .replace(/\b\d{1,3}\s*%\s*(?:\/\s*)?(?=\s|$)/g, '')
+
+    // Dairy descriptors
+    .replace(/\bwhole\s+milk\b/gi, '')
+    .replace(/\blow\s*fat\b/gi, '')
+    .replace(/\bnon\s*fat\b/gi, '')
+    .replace(/\bfat\s*free\b/gi, '')
+    .replace(/\b\d{1,2}\s*%\s*milkfat\b/gi, '')
+    .replace(/\b\d{1,2}\s*milkfat\b/gi, '')
+    .replace(/\b(a2\/a2|a2a2|a2|a1)\b/gi, '')
+
+    // General package / merchandising descriptors
+    .replace(/\bfully\s+cooked\b/gi, '')
+    .replace(/\bshredded\b/gi, '')
+    .replace(/\bgrated\b/gi, '')
+
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+
   // 4) Strip “made with …”, “with sea salt”, etc. at the end
   s = s.replace(/\bmade\s+with\b.*$/i, '').trim();
   s = s.replace(/\bwith\s+sea\s+salt\b.*$/i, '').trim();
@@ -111,7 +140,10 @@ function brandlessName(input: string): string {
   // 5) General cleanup of spacing / punctuation
   s = s
     .replace(/[–—]/g, '-')
-    .replace(/\s*[-,:;]\s*/g, ' ')
+    .replace(/\s*[-,:;/]\s*/g, ' ')
+    .replace(/(?:\s+\d{1,3})+\s*$/g, '')
+    .replace(/\b(of|the|and)\b\s*$/i, '')
+    .replace(/^[-,:;\s]+|[-,:;\s]+$/g, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
 

@@ -185,6 +185,31 @@ function inferDefaultUnitQtyForName(nameRaw: string): { unit: UnitOption; qty: n
     return { unit: 'can', qty: 1 };
   }
 
+  // Dairy liquids / tubs
+  if (/(^|\s)(milk|almond milk|oat milk|soy milk|yogurt|greek yogurt|cream|half and half)(\s|$)/.test(n)) {
+    return { unit: 'carton', qty: 1 };
+  }
+
+  // Cheese / tofu / butter
+  if (/(^|\s)(cheese|cheddar|mozzarella|parmesan|feta|goat cheese|tofu|butter)(\s|$)/.test(n)) {
+    return { unit: 'block', qty: 1 };
+  }
+
+  // Bottled condiments & oils
+  if (/(^|\s)(olive oil|oil|vinegar|soy sauce|tamari|ketchup|mustard|mayo|hot sauce|sriracha|dressing)(\s|$)/.test(n)) {
+    return { unit: 'bottle', qty: 1 };
+  }
+
+  // Eggs
+  if (/(^|\s)(egg|eggs)(\s|$)/.test(n)) {
+    return { unit: 'unit', qty: 12 };
+  }
+
+  // Bread / tortillas
+  if (/(^|\s)(bread|loaf|bagel|bun|tortilla|wrap)(\s|$)/.test(n)) {
+    return { unit: 'unit', qty: 1 };
+  }
+
   // Herbs
   if (/(^|\s)(cilantro|parsley|dill|basil|mint)(\s|$)/.test(n)) {
     return { unit: 'bunch', qty: 1 };
@@ -232,12 +257,57 @@ function sanitizeBarcodeDetectedQtyUnit(
       n,
     );
 
+  const looksFreshProtein =
+    /(^|\s)(ground beef|ground turkey|ground chicken|ground pork|ground lamb|beef|turkey|chicken|pork|lamb|veal|shrimp|fish|salmon|tuna|cod|tilapia)(\s|$)/.test(
+      n,
+    );
+
+      const looksDairyStaple =
+    /(^|\s)(milk|almond milk|oat milk|soy milk|yogurt|greek yogurt|cream|half and half)(\s|$)/.test(
+      n,
+    );
+
+  const looksBlockStaple =
+    /(^|\s)(cheese|cheddar|mozzarella|parmesan|feta|goat cheese|tofu|butter)(\s|$)/.test(
+      n,
+    );
+
+  const looksBottleStaple =
+    /(^|\s)(olive oil|oil|vinegar|soy sauce|tamari|ketchup|mustard|mayo|hot sauce|sriracha|dressing)(\s|$)/.test(
+      n,
+    );
+
+  const looksEggStaple = /(^|\s)(egg|eggs)(\s|$)/.test(n);
+
+  const looksBreadStaple = /(^|\s)(bread|loaf|bagel|bun|tortilla|wrap)(\s|$)/.test(n);
+
   const looksServingSizeLike =
     (normalizedUnit === 'oz' && numericQty > 0 && numericQty <= 8) ||
     (normalizedUnit === 'g' && numericQty > 0 && numericQty <= 150) ||
     (normalizedUnit === 'cup' && numericQty > 0 && numericQty <= 1.5) ||
     (normalizedUnit === 'tbsp' && numericQty > 0 && numericQty <= 8) ||
     (normalizedUnit === 'tsp' && numericQty > 0 && numericQty <= 24);
+
+  // If UPC metadata comes back as a generic "unit" for things we know have a
+  // better pantry default (for example tomato sauce cans or fresh proteins),
+  // prefer the inferred fallback.
+    const looksTooGenericForItem =
+    normalizedUnit === 'unit' &&
+    fallback.unit !== 'unit' &&
+    (
+      looksCannedStaple ||
+      looksDryPantryStaple ||
+      looksFreshProtein ||
+      looksDairyStaple ||
+      looksBlockStaple ||
+      looksBottleStaple ||
+      looksEggStaple ||
+      looksBreadStaple
+    );
+
+  if (looksTooGenericForItem) {
+    return fallback;
+  }
 
   if ((looksCannedStaple || looksDryPantryStaple) && looksServingSizeLike) {
     return fallback;
@@ -392,7 +462,7 @@ async function resolveUserId(): Promise<string> {
 }
 
 export default function PantryPage() {
-  useRequireAuth();
+  const { checking } = useRequireAuth();
 
   const [items, setItems] = useState<PantryItem[]>([]);
   const [form, setForm] = useState({
@@ -644,6 +714,8 @@ const upsertPantryItem = useCallback(
     }
   }
 
+  if (checking) return <div className="p-6 text-sm text-gray-500">Loading...</div>;
+
   return (
     <div className="max-w-3xl md:max-w-4xl mx-auto">
       <h1 className="text-2xl font-semibold mb-4 text-gray-900 dark:text-gray-100" data-build="pantry-tabs-v1">Pantry</h1>
@@ -822,7 +894,7 @@ for (const r of rows) {
                             autoFocus
                           />
                         ) : (
-                          <div className="truncate">{i.name}</div>
+                          <div className="truncate">{properCaseName(i.name)}</div>
                         )}
                       </td>
                       {/* Qty */}

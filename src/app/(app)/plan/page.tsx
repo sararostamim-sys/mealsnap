@@ -28,6 +28,7 @@ import { Fragment, Suspense } from 'react';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { trackEvent } from '@/lib/analytics';
 import Modal from '@/components/Modal';
+import { properCaseName } from '@/lib/normalize';
 
 type Recipe = {
   id: string;
@@ -169,7 +170,7 @@ function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
       return {
         qtyLabel: '1',
         unitLabel: 'bag',
-        nameLabel: name,
+        nameLabel: properCaseName(name),
       };
     }
   }
@@ -185,7 +186,7 @@ function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
       return {
         qtyLabel: '1',
         unitLabel: 'bunch',
-        nameLabel: name,
+        nameLabel: properCaseName(name),
       };
     }
   }
@@ -195,7 +196,7 @@ function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
     return {
       qtyLabel: String(qty),
       unitLabel: unit,
-      nameLabel: name,
+      nameLabel: properCaseName(name),
     };
   }
 
@@ -204,7 +205,7 @@ function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
     return {
       qtyLabel: String(qty),
       unitLabel: '',
-      nameLabel: name,
+      nameLabel: properCaseName(name),
     };
   }
 
@@ -212,7 +213,7 @@ function formatShoppingItem(item: ShoppingItem): DisplayShoppingItem {
   return {
     qtyLabel: String(qty),
     unitLabel: unit === 'unit' ? '' : unit,
-    nameLabel: name,
+    nameLabel: properCaseName(name),
   };
 }
 
@@ -564,7 +565,7 @@ function recipePrefsSignature(p: Prefs) {
   ];
 
 function PlanPageInner() {
-  useRequireAuth();
+  const { checking } = useRequireAuth();
 
   const router = useRouter();
   const pathname = usePathname();
@@ -2385,6 +2386,8 @@ const { data: planRow, error: planErr } = await supabase
     URL.revokeObjectURL(url);
   }
 
+  // (moved per hook-order lint: see below)
+
   function copyToClipboard() {
     if (!shopping.length) {
       alert('Shopping list is empty.');
@@ -2545,6 +2548,10 @@ const { data: planRow, error: planErr } = await supabase
   onlyPeopleChangedSincePlan,
   legacyPlanMissingSnapshots,
 ]);
+
+if (checking) {
+    return <div className="p-6 text-sm text-gray-500">Loading...</div>;
+  }
 
   if (loading) return <p className="max-w-3xl mx-auto">Loading…</p>;
 
@@ -2966,7 +2973,7 @@ const allergyHits: string[] = (() => {
                   {it.qty ?? ''} {it.unit ?? ''}{' '}
                   <span className="inline-flex items-center gap-1">
                     <span>
-                      {it.name}
+                      {properCaseName(it.name)}
                       {it.optional ? ' (optional)' : ''}
                     </span>
                     {isUseSoonIngredient(it.name) && (
