@@ -2627,31 +2627,32 @@ const allergyHits: string[] = (() => {
     <div className="max-w-3xl mx-auto">
       {/* Header */}
       <div className="mb-4">
-        <div className="flex items-start justify-between gap-4">
+       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           {/* LEFT: title only */}
-          <div className="flex-1 min-w-0">
+          <div className="w-full md:flex-1 md:min-w-0">
             <h1 className="text-2xl font-semibold text-gray-900 dark:text-gray-100">
               Your {mealsN.length}-Dinner Plan
             </h1>
           </div>
 
           {/* CENTER: AI + favorites pills */}
-          <div className="flex flex-col items-center justify-center gap-1 px-2">
+          <div className="flex w-full flex-col items-start gap-2 md:w-auto md:items-center md:justify-center md:px-2">
             {plannerMode === 'llm' && !stale && (
-              <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200">
+              <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs sm:px-2.5 sm:py-1 sm:text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200 whitespace-nowrap">
                 This plan was AI-optimized ✨
               </div>
             )}
 
             {showHealthyBadge && (
-            <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200">
-            Focused on balanced, whole-food meals
+            <div className="inline-flex items-center rounded-full border border-indigo-200 bg-indigo-50 px-2 py-1 text-xs sm:px-2.5 sm:py-1 sm:text-xs font-medium text-indigo-700 dark:border-indigo-500/40 dark:bg-indigo-900/40 dark:text-indigo-200 whitespace-nowrap">
+            <span className="sm:hidden">Whole-food focused</span>
+            <span className="hidden sm:inline">Focused on balanced, whole-food meals</span>
            </div>
            )}
           </div>
 
           {/* RIGHT: regenerate button */}
-        <div className="flex-shrink-0 pt-[2px]">
+        <div className="w-full md:w-auto md:flex-shrink-0 md:pt-[2px]">
   <button
   onClick={
   legacyPlanMissingSnapshots
@@ -2661,9 +2662,9 @@ const allergyHits: string[] = (() => {
     : generateAndSave
 }
   disabled={generating}
-  className={`rounded px-4 py-2 bg-black text-white hover:opacity-90 dark:bg-white dark:text-black ${
-    generating ? 'opacity-50 cursor-not-allowed' : ''
-  }`}
+  className={`w-full rounded px-4 py-2 bg-black text-white hover:opacity-90 md:w-auto dark:bg-white dark:text-black ${
+  generating ? 'opacity-50 cursor-not-allowed' : ''
+}`}
 >
   {generating
   ? 'Generating…'
@@ -2680,7 +2681,7 @@ const allergyHits: string[] = (() => {
 
         {/* Row 2: date */}
         {generatedLabel && (
-  <div className="mt-1 flex items-center justify-between gap-4">
+  <div className="mt-2 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
     <p className="text-sm text-gray-600 dark:text-gray-400">
       Generated on {generatedLabel}
     </p>
@@ -2688,9 +2689,9 @@ const allergyHits: string[] = (() => {
     <button
       onClick={copyShareLink}
       disabled={!planMeta}
-      className={`rounded px-4 py-2 border border-gray-300 dark:border-gray-700 text-sm
-        text-gray-900 dark:text-gray-100 hover:bg-gray-50 dark:hover:bg-neutral-800
-        ${!planMeta ? 'opacity-50 cursor-not-allowed' : ''}`}
+      className={`w-full rounded px-4 py-2 border border-gray-300 dark:border-gray-700 text-sm
+      text-gray-900 dark:text-gray-100 hover:bg-gray-50 md:w-auto dark:hover:bg-neutral-800
+      ${!planMeta ? 'opacity-50 cursor-not-allowed' : ''}`}
     >
       Copy share link
     </button>
