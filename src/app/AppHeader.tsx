@@ -40,12 +40,14 @@ export default function AppHeader() {
       unsub = () => sub.subscription.unsubscribe();
     })();
 
-    return () => { unsub?.(); };
+    return () => {
+      unsub?.();
+    };
   }, []);
 
   async function handleSignOut() {
     await supabase.auth.signOut();
-    router.replace('/');     // back to landing
+    router.replace('/');
     router.refresh();
   }
 
@@ -53,13 +55,17 @@ export default function AppHeader() {
 
   return (
     <header className="sticky top-0 z-40 border-b border-gray-200 dark:border-gray-800 bg-white/80 dark:bg-neutral-950/80 backdrop-blur">
-      <nav className="mx-auto max-w-5xl h-12 px-4 flex items-center justify-between">
+      {/* Top row */}
+      <nav className="mx-auto max-w-5xl h-14 px-4 flex items-center justify-between">
         {/* Left: Brand */}
-        <Link href="/pantry" className="font-semibold tracking-tight text-gray-900 dark:text-gray-100">
+        <Link
+          href="/pantry"
+          className="font-semibold tracking-tight text-gray-900 dark:text-gray-100"
+        >
           MealCue
         </Link>
 
-        {/* Middle: Primary links */}
+        {/* Middle: Desktop primary links */}
         <div className="hidden sm:flex gap-1 text-sm">
           {LINKS.map(({ href, label }) => {
             const active = pathname === href || pathname?.startsWith(href + '/');
@@ -73,7 +79,7 @@ export default function AppHeader() {
                   'text-gray-800 dark:text-gray-200',
                   active
                     ? 'font-semibold bg-gray-100 dark:bg-neutral-800'
-                    : 'opacity-80 hover:opacity-100 hover:bg-gray-50 dark:hover:bg-neutral-800'
+                    : 'opacity-80 hover:opacity-100 hover:bg-gray-50 dark:hover:bg-neutral-800',
                 ].join(' ')}
               >
                 {label}
@@ -83,7 +89,7 @@ export default function AppHeader() {
         </div>
 
         {/* Right: Auth action */}
-        <div>
+        <div className="flex-shrink-0">
           {loading ? (
             <span className="text-sm opacity-60">…</span>
           ) : isAuthed ? (
@@ -106,6 +112,33 @@ export default function AppHeader() {
           )}
         </div>
       </nav>
+
+      {/* Mobile nav row */}
+      <div className="sm:hidden border-t border-gray-200 dark:border-gray-800">
+        <div className="mx-auto max-w-5xl px-4 py-2 overflow-x-auto">
+          <div className="flex gap-2 min-w-max">
+            {LINKS.map(({ href, label }) => {
+              const active = pathname === href || pathname?.startsWith(href + '/');
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  aria-current={active ? 'page' : undefined}
+                  className={[
+                    'px-3 py-1.5 rounded-md text-sm whitespace-nowrap transition',
+                    'text-gray-800 dark:text-gray-200',
+                    active
+                      ? 'font-semibold bg-gray-100 dark:bg-neutral-800'
+                      : 'opacity-80 hover:opacity-100 hover:bg-gray-50 dark:hover:bg-neutral-800',
+                  ].join(' ')}
+                >
+                  {label}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      </div>
     </header>
   );
 }

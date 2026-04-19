@@ -268,6 +268,7 @@ function violatesDietLite(recipe: RecipeLite, diet: string): boolean {
   return ings.some((ing) => rules.some((rx) => rx.test(ing)));
 }
 
+
 function violatesTermsLite(recipe: RecipeLite, terms: string[]): boolean {
   if (!terms?.length) return false;
   const ings = recipe.ingredients ?? [];
@@ -277,6 +278,59 @@ function violatesTermsLite(recipe: RecipeLite, terms: string[]): boolean {
     }
   }
   return false;
+}
+
+function healthyFallbackScore(recipe: RecipeLite, prefs: PrefsLite): number {
+  if (!prefs.healthy_whole_food) return 0;
+
+  const title = norm(recipe.title);
+  const ings = (recipe.ingredients ?? []).map(norm).filter(Boolean);
+  const hay = [title, ...ings].join(' ');
+
+  let score = 0;
+
+  // Positive healthy / whole-food signals
+  if (/(\bvegetable\b|\bbroccoli\b|\bcauliflower\b|\bspinach\b|\bzucchini\b|\bpepper\b|\bcarrot\b|\bkale\b|\bcabbage\b)/.test(hay)) score += 1.5;
+  if (/(\bbean\b|\bbeans\b|\blentil\b|\blentils\b|\bchickpea\b|\bchickpeas\b)/.test(hay)) score += 1.25;
+  if (/(\bquinoa\b|\bbrown rice\b|\bwhole wheat\b|\bwhole-wheat\b|\bwhole grain\b|\bwhole-grain\b)/.test(hay)) score += 1;
+  if (/(\bchicken\b|\bsalmon\b|\bfish\b|\bshrimp\b|\bturkey\b|\btofu\b|\btempeh\b|\begg\b|\beggs\b)/.test(hay)) score += 1;
+
+  // Negative heavier / more processed signals
+  if (/(\bfried\b|\bcrispy\b|\bbacon\b|\bsausage\b|\bpepperoni\b|\bhot dog\b|\bdeep fried\b)/.test(hay)) score -= 2;
+  if (/(\bheavy cream\b|\bcream cheese\b|\balfredo\b)/.test(hay)) score -= 1.5;
+  if (/(\bcandy\b|\bdessert\b|\bsoda\b|\bsugary\b)/.test(hay)) score -= 2;
+
+  // Micro-survey steering (minimal, high ROI)
+  if (prefs.healthy_goal === 'weight' && /(\bcream\b|\bbutter\b|\bbacon\b|\bsausage\b|\balfredo\b)/.test(hay)) score -= 1;
+  if (prefs.healthy_goal === 'metabolic' && /(\bwhite rice\b|\bwhite bread\b|\bwhite pasta\b|\bsugary\b)/.test(hay)) score -= 1;
+  if (prefs.healthy_protein_style === 'plant_forward' && /(\bbean\b|\bbeans\b|\blentil\b|\blentils\b|\bchickpea\b|\bchickpeas\b|\btofu\b|\btempeh\b)/.test(hay)) score += 1;
+  if (prefs.healthy_protein_style === 'lean_animal' && /(\bchicken\b|\bturkey\b|\bsalmon\b|\bfish\b|\begg\b|\beggs\b|\byogurt\b)/.test(hay)) score += 1;
+  if (prefs.healthy_carb_pref === 'lower_carb' && /(\bpasta\b|\bbread\b|\bpotato\b|\bpotatoes\b|\bwhite rice\b)/.test(hay)) score -= 1;
+  if (prefs.healthy_carb_pref === 'more_whole_grains' && /(\bbrown rice\b|\bwhole wheat\b|\bwhole-wheat\b|\bwhole grain\b|\bwhole-grain\b|\bquinoa\b)/.test(hay)) score += 1;
+
+  return score;
+}
+
+function kidFriendlyFallbackScore(recipe: RecipeLite, prefs: PrefsLite): number {
+  if (!prefs.kid_friendly) return 0;
+
+  const title = norm(recipe.title);
+  const ings = (recipe.ingredients ?? []).map(norm).filter(Boolean);
+  const hay = [title, ...ings].join(' ');
+
+  let score = 0;
+
+  // Positive kid-friendly signals
+  if (/(\bchicken\b|\brice\b|\bpasta\b|\bnoodle\b|\bmeatball\b|\bmeatballs\b|\btaco\b|\bbowl\b|\bsoup\b)/.test(hay)) score += 1.5;
+  if ((recipe.time_min ?? 999) <= 35) score += 0.5;
+  if ((recipe.ingredients ?? []).length <= 10) score += 0.5;
+
+  // Negative kid-friendly signals
+  if (/(\bspicy\b|\bbuffalo\b|\bjalapeno\b|\bjalapeño\b|\bchipotle\b|\bhot sauce\b|\bchili flakes\b|\bred pepper flakes\b)/.test(hay)) score -= 2;
+  if (/(\barugula\b|\bkale\b|\bmustard greens\b|\bradicchio\b)/.test(hay)) score -= 1;
+  if (/(\bvinegar\b|\bpickled\b)/.test(hay)) score -= 0.5;
+
+  return score;
 }
 
 function scoreFallbackRecipe(
@@ -300,7 +354,10 @@ function scoreFallbackRecipe(
   const favBoost = recipe.is_favorite && prefs.favorite_mode === 'favorites' ? 3 : 0;
 
   // Prefer high pantry overlap, fewer missing items
-  return pantryHits * 2 - missing * 0.75 + timeScore + favBoost;
+  const healthyBoost = healthyFallbackScore(recipe, prefs);
+  const kidBoost = kidFriendlyFallbackScore(recipe, prefs);
+
+  return pantryHits * 2 - missing * 0.75 + timeScore + favBoost + healthyBoost + kidBoost;
 }
 
 function uniq<T>(arr: T[]): T[] {

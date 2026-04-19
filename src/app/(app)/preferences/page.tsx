@@ -53,6 +53,7 @@ const DISLIKE_OPTIONS: { value: string; label: string }[] = [
   { value: 'anchovy', label: 'Anchovies' },
   { value: 'beets', label: 'Beets' },
   { value: 'eggplant', label: 'Eggplant' },
+  { value: 'tofu', label: 'Tofu' },
   { value: 'blue_cheese', label: 'Blue cheese' },
 ];
 
@@ -60,7 +61,7 @@ const HEALTHY_SURVEY_KEY = 'mc_healthy_survey_v1';
 const HEALTHY_SURVEY_DONE_KEY = 'mc_healthy_survey_v1_completed';
 
 export default function PreferencesPage() {
-  useRequireAuth();
+  const { checking } = useRequireAuth();
 
   const [prefs, setPrefs] = useState<Prefs>({
     diet: 'none',
@@ -215,6 +216,7 @@ export default function PreferencesPage() {
     // void save();
   }
 
+  if (checking) return <div className="p-6 text-sm text-gray-500">Loading...</div>;
   if (loading) return <p className="max-w-2xl mx-auto">Loading…</p>;
 
   // shared styles (kept consistent with Pantry)

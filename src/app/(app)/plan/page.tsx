@@ -1072,7 +1072,7 @@ const pantryUseSoon = useMemo(() => {
     if (prefs.healthy_whole_food || prefs.kid_friendly) {
       healthyProfile = {
         ...DEFAULT_HEALTHY_WHOLE_FOOD_PROFILE,
-        wholeFoodFocus: !!prefs.healthy_whole_food || !!prefs.kid_friendly,
+        wholeFoodFocus: !!prefs.healthy_whole_food,
         kidFriendly: prefs.kid_friendly,
       };
 
@@ -1581,8 +1581,12 @@ chosen = withPerishableScore.map((x) => x.recipe);
     }
 
     if (shouldBalanceNonVeg && chosen && chosen.length >= 3) {
-      // Allow up to 40% veg-like meals for omnivore users.
-      const maxVeg = Math.max(1, Math.floor(dinnersPerWeek * 0.4));
+      // When both healthy + kid-friendly are OFF, keep veg-like meals to at most 1 for now.
+      // Otherwise use the softer 40% cap for omnivore users.
+      const maxVeg =
+        !prefsSafe.healthy_whole_food && !prefsSafe.kid_friendly
+          ? 1
+          : Math.max(1, Math.floor(dinnersPerWeek * 0.4));
 
       let vegCount = chosen.reduce((acc, r) => acc + (isVegLikeRecipe(r) ? 1 : 0), 0);
 
